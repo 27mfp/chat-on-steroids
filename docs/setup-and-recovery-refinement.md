@@ -35,3 +35,9 @@ The first unpublished candidate passed packaged-runtime smoke but rejected the d
 Validation: packaging regression coverage accepts a 13.0 desktop addon under the declared 13.0 floor and rejects 14.0. Native bundle/archive verification remains mandatory in the release workflow. No release or update notification was published for the failed candidate.
 
 The Windows published-plugin fixture also bypassed PluginManager's process-tree shutdown. SDK close could stop a Python launcher while Unity's child retained the temporary working directory, producing EBUSY on both main CI attempts. The fixture now uses the same existing terminateProcessTree boundary before closing the transport and deleting its own directory; discovery assertions and cleanup remain enforced.
+
+## Deterministic OAuth timeout fixture
+
+The Intel macOS release runner exposed a test race: its 70 ms real deadline could expire during OAuth discovery before the pending-browser state under test existed. The fixture now controls only timeout timers, reaches the browser callback, then explicitly expires the same 70 ms deadline or cancels. Loopback callback-closure checks still use real I/O. Early sign-in failure is raced against browser opening so it cannot leave an unhandled assertion and a hanging wait. Product OAuth behavior and deadlines are unchanged.
+
+Validation: all seven OAuth tests pass locally; typecheck and platform CI verify the final fixture.
