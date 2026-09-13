@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-13**, including current working-tree changes. App/extension **2.0.10**,
+Source alignment: **2026-09-13**, including current working-tree changes. App/extension **2.1.0**,
 bridge protocol **13** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
 
