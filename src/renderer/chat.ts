@@ -8,6 +8,8 @@ import { userPromptText } from '../shared/user-prompt.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { toolResultText } from './tool-result.js';
 import { chatErrorPresentation } from './chat-error.js';
+import { renderRecoveryCountdowns } from './recovery.js';
+import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
 import { isAstraModel, isProModel } from '../shared/chat-models.js';
@@ -38,7 +40,8 @@ import {
   CHAT_ACTIVE_MS,
   CONTINUATION_MARKER,
   TURN_OUTCOME_LABELS,
-  foldProgress
+  foldProgress,
+  toolCallSummary
 } from '../shared/session.js';
 import { chronological } from '../shared/chronology.js';
 import { recentChatActivity, sessionWorkingAt, workerReportedFinish } from '../shared/session-activity.js';
@@ -78,8 +81,10 @@ const KIND_ICON: Record<ActivitySummary['kind'], string> = {
  * A little over one row, so the fetch starts while there is still something to read.
  */
 const GOAL_SCROLL_MARGIN = 72;
-/** Hard renderer budgets: durable history may be larger, but one paint may not be. */
+/** Page size and bounded staging capacity. A page is not a viewport: hundreds of
+ * collapsed tool records can occupy less space than one authored message. */
 const MAX_TIMELINE_ROWS = 160;
+const MAX_TIMELINE_RESIDENT_ROWS = MAX_TIMELINE_ROWS * 2;
 const MAX_TIMELINE_TEXT_CHARS = 2 * 1024 * 1024;
 const MAX_RENDERED_HTML_CHARS = 256 * 1024;
 const SESSION_PAGE_SIZE = 60;
@@ -690,6 +695,7 @@ function scheduleToolActivityExpiry(): void {
 }
 
 function canonicalMessageKey(event: SessionEvent): string | null {
+  if (event.kind === 'tool_call') return `tool_call\u0000${event.call.callId}`;
   if ((event.kind === 'user_message' || event.kind === 'assistant_message') && event.messageId) {
     return `${event.kind}\u0000${event.messageId}`;
   }
@@ -714,7 +720,7 @@ function mergeDetailDelta(delta: SessionEvent[]): void {
     }
   }
   const folded = chronological(foldProgress(merged));
-  events = folded.slice(Math.max(0, folded.length - MAX_TIMELINE_ROWS));
+  events = retainTimelinePage(folded, 'newer');
 }
 
 let controlsGeneration = 0;
@@ -726,6 +732,7 @@ let controlledFinishWaiting = false;
 let controlledQueueAtFinish = false;
 let controlledCanInject = false;
 let controlledCanSendDirectly = false;
+let controlledRecovery: RecoveryCountdown[] = [];
 let pendingComposerInputs: InputEntry[] = [];
 let inputQueueGeneration = 0;
 let goalIntentGeneration = 0;
@@ -738,6 +745,7 @@ function cancelGoalRequest(): void {
 }
 type GoalDraftPresentation = { stage: string; model: string; text: string; error: string | null };
 let goalDraftView: GoalDraftPresentation | null = null;
+let goalWaitView: import('../shared/goal.js').GoalWait | null = null;
 let finishGoalDraftView: GoalDraftPresentation | null = null;
 function paintGoalProgress(): void {
   let row = document.getElementById('goalLifecycle');
@@ -746,12 +754,14 @@ function paintGoalProgress(): void {
   const entry = progress?.inputId ? pendingComposerInputs.find(item => item.id === progress.inputId) : undefined;
   const finishDraft = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? finishGoalDraftView : null;
   const draft = finishDraft ?? (controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalDraftView : null);
+  const wait = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalWaitView : null;
   const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
   if (off && !finishDraft) { row.hidden = true; row.replaceChildren(); row.setAttribute('aria-busy', 'false'); return; }
   let phase = progress?.phase ?? '';
   let text = progress?.text ?? '', error = progress?.error;
   if (entry) { phase = entry.state; error = entry.error ?? undefined; }
   if (draft && (!off || finishDraft) && (finishDraft || !['saving', 'failed'].includes(phase))) { phase = draft.stage; text = draft.text; error = draft.error ?? undefined; }
+  else if (wait && !['saving', 'failed'].includes(phase)) { phase = 'settling'; text = ''; error = undefined; }
   const labels: Record<string, string> = { saving: t("Saving task…"), saved: t("Task saved · waiting for the next completed answer"),
     preparing: t("Preparing the opening message…"), generating: t("Generating the opening message…"), ready: t("Message ready · awaiting ChatGPT delivery"),
     sending: t("Preparing a continuation…"), answering: t("Generating a continuation…"), queued: t("Opening message queued"),
@@ -759,13 +769,21 @@ function paintGoalProgress(): void {
     failed: t("Task could not continue"), cancelled: t("Opening message cancelled"), paused: t("Automation paused · task text preserved"), 'no-reply': t("Goal reached") };
   if (phase === 'retrying') { text = ''; error = undefined; }
   labels.retrying = t("Provider busy · retry {0}{1}", [progress?.attempt ?? '', progress?.retryAt ? ' at ' + new Date(progress.retryAt).toLocaleTimeString() : '']);
+  const mode = $<HTMLSelectElement>('chatAutomation').value === 'loop' ? t('Loop') : t('Goal');
+  labels.settling = `${mode} · ${wait?.reason === 'quiet' ? t('Waiting for tool inactivity') :
+    wait?.reason === 'tools' ? t('Waiting for running tools') : wait?.reason === 'listening' ? t('Waiting for activity after recovery') : t('Answer settling')}`;
   row.hidden = !phase; if (!phase) return;
-  const busy = ['saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
+  const busy = ['settling', 'saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
   row.setAttribute('aria-busy', String(busy));
   const marker = el('span', busy ? 'session-status is-working' : 'session-status');
   const body = el('div', 'queue-label'); body.append(el('span', '', error ? `${labels.failed}: ${error}` : labels[phase] ?? phase));
   if (text && ['generating', 'answering', 'preparing'].includes(phase)) { const preview = el('pre', 'goal-live-preview', text.slice(-8000)); body.append(preview); }
   row.replaceChildren(marker, body);
+  if (phase === 'settling' && wait?.until) {
+    const seconds = Math.max(0, Math.ceil((wait.until - Date.now()) / 1000));
+    const timer = el('span', 'recovery-countdown', seconds ? t('Check in {0}', [`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`]) : t('Checking for activity…'));
+    timer.setAttribute('role', 'timer'); timer.setAttribute('aria-live', 'off'); row.append(timer);
+  }
 }
 const cancelledStarts = new Set<string>();
 const queuedFollowup = (entry: InputEntry): boolean => entry.mode === 'finish' || (entry.mode === 'after-turn' && !!entry.sessionId && entry.purpose !== 'decision');
@@ -1048,12 +1066,14 @@ async function refreshSessionControls(): Promise<void> {
   controlledSelection = selectionGeneration;
   controlledTurnId = controls?.activeTurnId ?? null;
   goalDraftView = controls?.goalDraft ?? null;
+  goalWaitView = controls?.goalWait ?? null;
   finishGoalDraftView = controls?.finishGoalDraft ?? null;
   controlledStopPending = controls?.stopPending === true;
   controlledFinishWaiting = controls?.finishWaiting === true;
   controlledQueueAtFinish = controls?.queueAtFinish === true;
   controlledCanInject = controls?.canInject ?? controlledTurnId !== null;
   controlledCanSendDirectly = controls?.canSendDirectly === true;
+  controlledRecovery = controls?.recovery ?? [];
   paintDeliveryControls();
   paintStateLine();
   menu.hidden = !controls;
@@ -1083,6 +1103,7 @@ async function navigateHistory(before: number | null, prepend = false): Promise<
   const selected = selectedId;
   const selection = selectionGeneration;
   historyBefore = before;
+  if (before === null) $('timeline').style.removeProperty('--timeline-scroll-reserve');
   detailCursor = null;
   const loading = loadDetail(true, prepend);
   const generation = detailLoadGeneration;
@@ -1123,18 +1144,14 @@ async function loadDetail(navigate = false, prepend = false, newerFrom?: number)
   else {
     const folded = chronological(foldProgress(detail.events));
     if (newerFrom !== undefined) {
-      events = chronological(foldProgress([...events, ...folded])).slice(-MAX_TIMELINE_ROWS);
+      events = retainTimelinePage(chronological(foldProgress([...events, ...folded])), 'newer');
       // Reaching the live tail restores ordinary delta reads. Paging itself preserves
       // the reader's row even when they were at the bottom of the previous window.
       if (detail.events.length < MAX_TIMELINE_ROWS / 2) historyBefore = null;
     } else if (prepend) {
       const boundary = historyBefore!;
-      const retained = events.filter(event => event.seq >= boundary).slice(0, MAX_TIMELINE_ROWS - folded.length);
-      events = chronological(foldProgress([...folded, ...retained]));
-      // Keep the newly requested history reachable even if one retained answer exceeds
-      // the text budget by itself. The bounded page then starts at the older content.
-      let textCost = events.reduce((sum, event) => sum + eventTextCost(event), 0);
-      while (events.length > folded.length && textCost > MAX_TIMELINE_TEXT_CHARS) textCost -= eventTextCost(events.pop()!);
+      const retained = events.filter(event => event.seq >= boundary);
+      events = retainTimelinePage(chronological(foldProgress([...folded, ...retained])), 'older');
     } else events = folded.slice(Math.max(0, folded.length - MAX_TIMELINE_ROWS));
     detailFor = wanted;
   }
@@ -1436,10 +1453,12 @@ const rowCache = new Map<string, { sig: string; row: HTMLElement }>();
 function forgetTimelineRows(): void {
   openTools.clear();
   rowCache.clear();
+  $('timeline').style.removeProperty('--timeline-scroll-reserve');
 }
 
 function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?: { id: string; current: () => boolean }): HTMLElement {
   const { call } = event;
+  const summary = toolCallSummary(call);
   const box = document.createElement('details');
   box.className = `tool tone-${call.summary.tone}`;
   box.open = openTools.has(call.callId);
@@ -1452,7 +1471,7 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
   head.append(icon(KIND_ICON[call.summary.kind] ?? 'i-bolt', 'ico tool-ico'));
   head.append(el('b', '', call.summary.title));
   if (call.summary.detail) head.append(el('em', '', call.summary.detail));
-  if (call.summary.metric) head.append(el('span', 'metric', call.summary.metric));
+  if (summary.metric) head.append(el('span', 'metric', summary.metric));
   box.append(head);
 
   const raw = el('div', 'raw');
@@ -1754,11 +1773,47 @@ function eventTextCost(event: SessionEvent): number {
   }
 }
 
-/** Newest-first selection, returned chronologically, under row and text/HTML budgets. */
+/** Eviction follows the measured reader viewport, not an arbitrary half-page.
+ * Keep the current visible rows plus the incoming stage; ordinary tall histories
+ * still settle at 160 records. Dense collapsed activity has bounded extra room. */
+function retainTimelinePage(source: SessionEvent[], direction: 'older' | 'newer'): SessionEvent[] {
+  const pane = $('chatBody');
+  const edge = pane.getBoundingClientRect().top;
+  const protectedKeys = new Set<string>();
+  for (const row of $('timeline').querySelectorAll<HTMLElement>('[data-timeline-key]')) {
+    const rect = row.getBoundingClientRect();
+    if (rect.height <= 0 || rect.bottom <= edge - pane.clientHeight) continue;
+    if (rect.top >= edge + 2 * pane.clientHeight) break;
+    protectedKeys.add(row.dataset.timelineKey!);
+    if (row.matches('.tool-group:not([open])')) {
+      for (const child of row.querySelectorAll<HTMLElement>('[data-timeline-key]')) protectedKeys.add(child.dataset.timelineKey!);
+    }
+  }
+  const protectedSeqs = new Set<number>();
+  for (const item of timelineItems(source)) {
+    if (item.kind !== 'compaction' || !protectedKeys.has(itemKey(item))) continue;
+    const block = item.block;
+    protectedSeqs.add(block.seq);
+    for (const event of [block.prompt, block.brief, block.end, block.handoff, block.resume, ...block.notes]) {
+      if (event) protectedSeqs.add(event.seq);
+    }
+  }
+  const protectedIndexes = source.flatMap((event, index) => protectedSeqs.has(event.seq) || protectedKeys.has(itemKey({ kind: 'event', event })) ? [index] : []);
+  const first = protectedIndexes[0] ?? source.length;
+  const last = protectedIndexes.at(-1) ?? -1;
+  if (direction === 'older') {
+    const end = Math.min(source.length, Math.max(MAX_TIMELINE_ROWS, last + 1));
+    return source.slice(0, Math.min(end, MAX_TIMELINE_RESIDENT_ROWS));
+  }
+  const start = Math.max(0, Math.min(source.length - MAX_TIMELINE_ROWS, first));
+  return source.slice(Math.max(start, source.length - MAX_TIMELINE_RESIDENT_ROWS));
+}
+
+/** Newest-first selection, returned chronologically, under resident and text/HTML budgets. */
 function boundedTimeline(source: SessionEvent[]): { shown: SessionEvent[]; omitted: number } {
   let chars = 0;
   let start = source.length;
-  while (start > 0 && source.length - start < MAX_TIMELINE_ROWS) {
+  while (start > 0 && source.length - start < MAX_TIMELINE_RESIDENT_ROWS) {
     const next = source[start - 1]!;
     const cost = Math.min(eventTextCost(next), MAX_TIMELINE_TEXT_CHARS);
     if (start < source.length && chars + cost > MAX_TIMELINE_TEXT_CHARS) break;
@@ -2095,7 +2150,11 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
     let end = i + 1;
     while (end < rows.length && rows[end]!.matches('.ev-tool_call, .ev-page_tool, .ev-agent_message') && rows[end]!.dataset.activityBoundary === rows[i]!.dataset.activityBoundary) end++;
     if (end - i === 1) { grouped.push(rows[i++]!); continue; }
-    const key = `group:${scope}:${rows[i]!.dataset.timelineKey}`;
+    // Paging can extend or trim the beginning of an activity group. Its first
+    // member is therefore not a new disclosure/viewport identity.
+    const previous = rows.slice(i, end).map(row => row.closest<HTMLElement>('.tool-group'))
+      .find(group => group?.dataset.timelineKey && groups.get(group.dataset.timelineKey) === group && !retained.has(group.dataset.timelineKey));
+    const key = previous?.dataset.timelineKey ?? `group:${scope}:${rows[i]!.dataset.timelineKey}`;
     retained.add(key);
     let group = groups.get(key);
     if (!group) {
@@ -2121,7 +2180,7 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
   return grouped;
 }
 
-function paintDetail(followBottom = true): void {
+function paintDetail(followBottom = historyBefore === null): void {
   paintStateLine();
   const summary = sessions.find((s) => s.id === selectedId) ?? null;
   applyComposerSessionModel(selectedId ? `${selectedId}:${selectionGeneration}` : null, summary?.selectedModel ?? null);
@@ -2150,17 +2209,7 @@ function paintDetail(followBottom = true): void {
   }
   const keep = new Set<string>();
   let activityBoundary = '';
-  const recovery = [...shown].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:'));
-  const recoveryStatus = $('recoveryStatus');
-  const recoverySession = selectedId;
-  const recoveryRevision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
-  recoveryStatus.hidden = !recovery || Date.now() - recovery.time > 120000 || (!!recoverySession && dismissedRecoveryNotices.get(recoverySession) === recoveryRevision);
-  recoveryStatus.replaceChildren();
-  if (!recoveryStatus.hidden && recovery?.kind === 'progress') recoveryStatus.append(icon('i-pulse'), el('span', 'queue-label', recovery.message.text),
-    dockAction(() => t("Dismiss recovery notice"), 'i-x', () => {
-      if (recoverySession) dismissedRecoveryNotices.set(recoverySession, recoveryRevision);
-      recoveryStatus.hidden = true; recoveryStatus.replaceChildren();
-    }));
+  paintRecoveryStatus();
   const oldest = shown.length ? Math.min(...shown.map(event => event.time)) : 0;
   const newest = shown.length ? Math.max(...shown.map(event => event.time)) : 0;
   const retiredInputs = pendingComposerInputs.filter(entry => historicalAutomaticInput(entry) &&
@@ -2271,13 +2320,29 @@ function paintHandoff(): void {
   paintStateLine();
 }
 
-/**
- * One line under the header saying what is happening right now.
- *
- * The complaint this answers: the only place a user could find out whether a worker's chat
- * had opened was the raw Activity log, which is a diagnostics view rather than an answer to
- * "what is happening".
- */
+/** The live deadline takes precedence over the existing dismissible repair receipt. */
+function paintRecoveryStatus(): boolean {
+  const host = $('recoveryStatus');
+  const countdowns = selectedId && controlledSessionId === selectedId && controlledSelection === selectionGeneration ? controlledRecovery : [];
+  if (renderRecoveryCountdowns(host, countdowns)) return true;
+  const recovery = detailFor === selectedId ? [...events].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:')) : undefined;
+  const sessionId = selectedId;
+  const revision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
+  host.hidden = !recovery || Date.now() - recovery.time > 120000 || (!!sessionId && dismissedRecoveryNotices.get(sessionId) === revision);
+  host.replaceChildren();
+  if (!host.hidden && recovery?.kind === 'progress') {
+    const row = el('div', 'recovery-notice');
+    row.append(icon('i-pulse'), el('span', 'queue-label', recovery.message.text),
+      dockAction(() => t('Dismiss recovery notice'), 'i-x', () => {
+        if (sessionId) dismissedRecoveryNotices.set(sessionId, revision);
+        host.hidden = true; host.replaceChildren();
+      }));
+    host.append(row);
+  }
+  return false;
+}
+
+/** One line under the header saying what is happening right now. */
 function paintStateLine(): void {
   window.clearTimeout(durationTimer);
   durationTimer = undefined;
@@ -2287,7 +2352,10 @@ function paintStateLine(): void {
   note.className = `subhead-note${tone ? ` ${tone}` : ''}`;
   // Running state and timer ownership cannot depend on a translated label.
   note.classList.toggle('is-working', working === true);
-  if (visible && ticking) durationTimer = window.setTimeout(paintStateLine, 1000);
+  const recovering = paintRecoveryStatus();
+  const goalWaiting = controlledSessionId === selectedId && controlledSelection === selectionGeneration && !!goalWaitView;
+  if (goalWaiting) paintGoalProgress();
+  if (visible && (ticking || recovering || goalWaiting)) durationTimer = window.setTimeout(paintStateLine, 1000);
   repaintBadges();
 }
 
@@ -2850,6 +2918,7 @@ const CHAT_INPUTS = [
 /** Writes app state into this panel's controls. Called from the renderer's apply(). */
 export function chatApply(state: AppState, previous?: Config): void {
   const { config, bridge } = state;
+  if (visible && selectedId) void refreshSessionControls();
   paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
   applyChatModels(config, previous);
 

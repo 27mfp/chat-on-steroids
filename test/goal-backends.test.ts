@@ -2,8 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { recordLoopMcpProof } from './goal-mcp-proof.js';
 import { GOAL_CONTINUATIONS, GOAL_MARKER_INSTRUCTION, templateGoalDecision } from '../src/shared/goal-templates.js';
 import { promises as fs } from 'node:fs';
-const browser = vi.hoisted(() => ({ request: vi.fn(), authorize: vi.fn() }));
-vi.mock('../src/main/session/input.js', () => ({ requestBrowserDecision: browser.request, authorizeBrowserHelperRetry: browser.authorize, listInputs: async () => [] }));
+const browser = vi.hoisted(() => ({ request: vi.fn(), authorize: vi.fn(), inputs: [] as Array<{ id: string; sessionId: string; finishOwner?: { turnId: string; periodic: boolean } }> }));
+vi.mock('../src/main/session/input.js', () => ({ requestBrowserDecision: browser.request, authorizeBrowserHelperRetry: browser.authorize, listInputs: async () => browser.inputs }));
 vi.mock('electron', () => ({
   app: { getPath: () => '', getVersion: () => '0.0.0' },
   safeStorage: {
@@ -31,6 +31,7 @@ beforeEach(async () => {
   goal.resetGoalStateForTests();
   browser.request.mockReset();
   browser.authorize.mockReset();
+  browser.inputs = [];
   await setSecret('openRouterApiKey', '');
   await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'templates', loopBackend: 'api' } });
   vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('unexpected API request'); }));
@@ -202,6 +203,50 @@ describe('Goal decision backends', () => {
     expect(browser.request.mock.calls[2]?.[2]).toMatchObject({ conversationId: 'incremental-helper' });
     expect(fetch).not.toHaveBeenCalled();
   });
+  it('bounds the complete browser envelope while keeping a large original brief and newest result', async () => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt' } });
+    const id = 'bounded-browser';
+    const session = await createSession({ title: 'bounded', conversationId: id });
+    const original = 'Build the whole requested product. ' + 'requirement '.repeat(2000) + ' KEEP THIS ORIGINAL END';
+    await appendEvent(session.id, { source: 'extension', kind: 'user_message', time: 1000,
+      message: { text: original, chars: original.length, truncated: false } });
+    for (let index = 0; index < 12; index++) {
+      const text = `result ${index}: ` + '"\\\n'.repeat(3000);
+      await appendEvent(session.id, { source: 'extension', kind: 'assistant_message', final: true, time: 2000 + index,
+        message: { text, chars: text.length, truncated: false } });
+    }
+    const correction = 'LATEST USER CORRECTION ' + 'y'.repeat(47_000);
+    await appendEvent(session.id, { source: 'extension', kind: 'user_message', time: 3000,
+      message: { text: correction, chars: correction.length, truncated: false } });
+    browser.request.mockResolvedValue('{"action":"continue","reply":"Continue the full implementation"}');
+    goal.startGoalDraft({ conversationId: id, sessionId: session.id, turnId: 'bounded' });
+    expect((await settled(id)).stage).toBe('ready');
+    const prompt = browser.request.mock.calls[0]?.[0] as string;
+    expect(prompt.length).toBeLessThanOrEqual(96_000);
+    expect(prompt).toContain(original);
+    expect(prompt).toContain('result 11');
+    expect(prompt).toContain('LATEST USER CORRECTION');
+    expect(prompt).toContain('omitted');
+  });
+
+  it('labels only exact same-session automatic inputs without treating manual input as automation', async () => {
+    const session = await createSession({ title: 'provenance', conversationId: 'reference-provenance' });
+    browser.inputs = [
+      { id: 'automatic', sessionId: session.id, finishOwner: { turnId: 'turn', periodic: false } },
+      { id: 'manual', sessionId: session.id },
+      { id: 'other-session', sessionId: 'different', finishOwner: { turnId: 'turn', periodic: false } }
+    ];
+    for (const [index, inputId] of ['manual', 'automatic', 'other-session'].entries()) {
+      await appendEvent(session.id, { source: 'app', kind: 'user_message', inputId, time: 1000 + index,
+        message: { text: 'finish the same broad task', chars: 26, truncated: false } });
+    }
+    const messages = await goal.conversationMessages(session.id);
+    expect(messages[0]).toEqual({ role: 'user', content: 'finish the same broad task' });
+    expect(messages[1]).toMatchObject({ role: 'user', origin: 'automatic' });
+    expect(messages[1]?.content).toContain('not a new human requirement');
+    expect(messages[2]).toEqual({ role: 'user', content: 'finish the same broad task' });
+  });
+
   it('requires an API key for API finish follow-ups', async () => {
     const backend = 'api';
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, backend: 'templates', loopBackend: backend } });
@@ -219,7 +264,10 @@ describe('Goal decision backends', () => {
       const body = JSON.parse(String(init.body));
       expect(body.reasoning).toEqual({ effort: 'high', exclude: true });
       expect(body.messages[0].content).toBe('Keep advancing my loop request.');
-      expect(body.messages.some((message: { content: string }) => message.content === 'Finish the original task')).toBe(true);
+      const reference = body.messages.find((message: { role: string }) => message.role === 'user').content;
+      expect(body.messages.some((message: { role: string }) => message.role === 'assistant')).toBe(false);
+      expect(reference).toContain('role alone does not prove human authorship');
+      expect(JSON.parse(reference.slice(reference.indexOf('\n\n') + 2))).toContainEqual({ role: 'user', content: 'Finish the original task' });
       expect(JSON.stringify(body.messages)).toContain('Actual interim checks are running');
       return Response.json({ choices: [{ message: { content: '{"action":"continue","reply":"Finish the tests"}' } }] });
     });
@@ -365,6 +413,8 @@ it('generates a validated staged plan through the existing browser helper withou
   expect(await goal.draftTaskPlan('Build the feature and test it', 'chatgpt')).toEqual(['Implement the requested feature', 'Test every acceptance criterion']);
   expect(browser.request).toHaveBeenCalledTimes(1);
   expect(browser.request.mock.calls[0]![0]).toContain('Build the feature and test it');
+  expect(browser.request.mock.calls[0]![0]).toContain('Produce the requested staged workflow');
+  expect(browser.request.mock.calls[0]![0]).not.toContain('You only write the next prompt');
   expect(browser.request.mock.calls[0]![0]).not.toMatch(/session_finish|minutes before/i);
   browser.request.mockResolvedValueOnce(JSON.stringify({ action: 'continue', reply: '{"stages":[""]}' }));
   await expect(goal.draftTaskPlan('Build it', 'chatgpt')).rejects.toThrow('invalid stages');

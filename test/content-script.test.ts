@@ -4516,6 +4516,32 @@ describe('the app-owned chronological stream', () => {
     expect(overwriteText(section)).toContain('✕ exit 1');
   });
 
+  it('updates a background process in its existing stream row when its exit arrives', async () => {
+    let completed = false;
+    const processActivity = () => ({ ok: true, data: { entries: [], nextSince: completed ? 10 : 3,
+      stream: [
+        { seq: 1, time: 100, kind: 'turn_start', turnId, agent: null },
+        { seq: 2, time: 110, kind: 'tool_call', turnId, agent: null, tool: 'exec_command',
+          callId: 'process-call', requestId: 'wfr-process-stream', outcome: 'ok', durationMs: 10,
+          process: { sessionId: '1234', ...(completed ? { completedAt: 200, exitCode: 0 } : {}) },
+          summary: { kind: 'run', tone: completed ? 'good' : 'neutral',
+            title: completed ? 'Completed render' : 'Started render', metric: completed ? '✓ finished' : 'started' } }
+      ], job: null } });
+    live = await harness(undefined, { activity: processActivity });
+    renderingOn();
+    const section = assistantTurn(live.document, turnId, []);
+    await bindFiberRequest(section, 'wfr-process-stream', 'exec_command');
+    live.hook.renderStreams();
+    expect(overwriteText(section)).toContain('Started render');
+    completed = true;
+    await live.hook.pullActivity();
+    live.hook.renderStreams();
+    expect(overwriteText(section)).toContain('Completed render');
+    expect(overwriteText(section)).toContain('✓ finished');
+    expect(overwriteText(section)).not.toContain('Started render');
+    expect(overwriteStream(section)?.querySelectorAll('.clf-stream-tool_call')).toHaveLength(1);
+  });
+
   it('ignores ChatGPT DOM reasoning order and renders only the order recorded by the app', async () => {
     const orderedActivity = () => ({
       ok: true,
@@ -15040,6 +15066,13 @@ describe('the goal loop', () => {
 
     expect(view({ phase: 'settling', error: '', model: MODEL, draft: null })).toMatchObject({
       stage: 'Checking the answer is finished'
+    });
+    expect(view({ phase: 'settling', wait: { reason: 'quiet', until: live.window.Date.now() + 125_000 } })).toMatchObject({
+      stage: 'Waiting for tool inactivity', detail: 'Checking again in 2:05', at: 0
+    });
+    expect(view({ phase: 'settling', wait: { reason: 'tools' } })).toMatchObject({ stage: 'Waiting for running tools', detail: '' });
+    expect(view({ phase: 'settling', wait: { reason: 'listening', until: live.window.Date.now() + 60_000 } })).toMatchObject({
+      stage: 'Waiting for activity after recovery', detail: 'Checking again in 1:00'
     });
     expect(view({ phase: 'requesting', error: '', model: MODEL, draft: null })).toMatchObject({
       stage: 'Sending the answer to OpenRouter',

@@ -299,24 +299,28 @@ it('clears control projections on an existing-session switch and fences A to B t
   const first = summary([]), second = { ...summary([]), id: '2026-09-02-test0002', title: 'Other session' };
   const { w, append } = await boot([], true, [], [], { sessions: [first, second] });
   const api = (w as any).api;
-  const busy = { automation: 'off', objective: '', blocked: '', job: { busy: true } };
+  const busy = { automation: 'off', objective: '', blocked: '', job: { busy: true },
+    recovery: [{ kind: 'unattributed', deadline: Date.now() + 60_000 }] };
   api.getSessionControls = async () => ({ ok: true, data: busy });
   await append([]);
   const status = w.document.getElementById('sessionControlStatus')!;
   expect(status.textContent).toContain('Compaction');
+  expect(w.document.getElementById('recoveryStatus')!.textContent).toContain('Reload in');
   const pending: Array<(value: unknown) => void> = [];
   api.getSessionControls = () => new Promise(resolve => pending.push(resolve));
   await append([]); // old A refresh
   (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
   expect(status.textContent).toBe('');
+  expect(w.document.getElementById('recoveryStatus')!.hidden).toBe(true);
   expect(w.document.getElementById('cancelCompaction')!.hidden).toBe(true);
   (w.document.querySelector(`#sessionList [data-id="${first.id}"]`) as HTMLElement).click();
   expect(pending).toHaveLength(3);
-  pending[2]!({ ok: true, data: { ...busy, job: null } }); await settle();
+  pending[2]!({ ok: true, data: { ...busy, job: null, recovery: [] } }); await settle();
   pending[1]!({ ok: true, data: busy });
   pending[0]!({ ok: true, data: busy }); await settle();
   expect(status.textContent).toBe('');
   expect(w.document.getElementById('cancelCompaction')!.hidden).toBe(true);
+  expect(w.document.getElementById('recoveryStatus')!.hidden).toBe(true);
 });
 
 it('reorders queued tasks by drag and keyboard through the durable IPC operation', async () => {
@@ -1770,6 +1774,29 @@ it.each(['navigate', 'objective edit', 'mode change', 'automation change'] as co
   expect(live.sent).toHaveLength(0);
 });
 
+it('shows Loop settling, its real waiting deadline, and generated text in the same row', async () => {
+  const { w, append } = await boot([]);
+  const api = (w as any).api;
+  const controls = { automation: 'loop', objective: 'Continue the task', blocked: '', job: null,
+    goalWait: { reason: 'quiet', until: Date.now() + 125_000 }, goalDraft: null as unknown };
+  api.getSessionControls = async () => ({ ok: true, data: controls });
+  await append([]);
+  const row = w.document.getElementById('goalLifecycle')!;
+  expect(row.hidden).toBe(false);
+  expect(row.textContent).toContain('Loop · Waiting for tool inactivity');
+  expect(row.querySelector('[role="timer"]')?.textContent).toContain('2:05');
+  expect(row.getAttribute('aria-busy')).toBe('true');
+  controls.goalDraft = { stage: 'answering', model: 'fixture', text: 'Continue with the remaining checks', error: null };
+  await append([]);
+  expect(w.document.getElementById('goalLifecycle')).toBe(row);
+  expect(row.textContent).toContain('Generating a continuation');
+  expect(row.textContent).toContain('Continue with the remaining checks');
+  expect(row.querySelector('[role="timer"]')).toBeNull();
+  controls.automation = 'off'; await append([]);
+  expect(row.hidden).toBe(true);
+  expect(row.textContent).toBe('');
+});
+
 it('follows the accepted New Chat receipt while preserving a typed follow-up', async () => {
   const { w, live, append } = await boot([], false);
   const composer = w.document.getElementById('chatInput') as HTMLTextAreaElement;
@@ -2171,6 +2198,36 @@ it('scrolls forward through evicted history with wheel, keyboard and scrollbar, 
   await downward('wheel'); // Empty forward page proves we reached the current tail.
   await append([{ seq: 401, time: T0 + 401, source: 'extension', kind: 'user_message', messageId: 'live-again', message: text('Live again') }]);
   expect(timeline.textContent).toContain('Live again');
+});
+
+it('keeps admitting newer data when dense collapsed activity reaches the resident bound', async () => {
+  const rows = Array.from({ length: 400 }, (_, i) => toolCall(i + 1, `dense-${i}`));
+  const { w, live, append } = await boot(rows);
+  const api = (w as any).api;
+  api.getSession = async (_id: string, options: { from?: number; before?: number; limit: number }) => {
+    const eligible = live.events.filter(e => (options.from === undefined || e.seq >= options.from) && (options.before === undefined || e.seq < options.before));
+    const page = options.from === undefined ? eligible.slice(-options.limit) : eligible.slice(0, options.limit);
+    return { ok: true, data: { summary: summary(live.events), events: page, total: live.events.length,
+      nextFrom: page.reduce((next, e) => Math.max(next, e.seq + 1), options.from ?? 0) } };
+  };
+  const pane = w.document.getElementById('chatBody')!;
+  const timeline = w.document.getElementById('timeline')!;
+  Object.defineProperties(pane, { clientHeight: { value: 400 }, scrollHeight: { value: 400 } });
+  w.HTMLElement.prototype.getBoundingClientRect = function () {
+    return { top: 0, bottom: this.classList.contains('tool-group') ? 30 : 0,
+      height: this.classList.contains('tool-group') ? 30 : 0 } as DOMRect;
+  };
+  const group = timeline.querySelector('.tool-group');
+  for (let i = 0; i < 2; i++) {
+    pane.scrollTop = 0; pane.dispatchEvent(new w.WheelEvent('wheel', { deltaY: -100 })); await settle();
+  }
+  expect(timeline.querySelectorAll('.ev-tool_call')).toHaveLength(320);
+  expect(timeline.querySelector('.tool-group')).toBe(group);
+  pane.dispatchEvent(new w.WheelEvent('wheel', { deltaY: 100 })); await settle();
+  await append([{ seq: 401, time: T0 + 401_000, source: 'extension', kind: 'user_message',
+    messageId: 'dense-live', message: text('New data at the resident bound') }]);
+  expect(timeline.textContent).toContain('New data at the resident bound');
+  expect(timeline.querySelectorAll('.ev').length).toBeLessThanOrEqual(320);
 });
 
 it.each(['older', 'newer'])('does not apply a %s-page response or scroll after switching to a new chat', async direction => {

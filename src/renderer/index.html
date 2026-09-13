@@ -316,9 +316,8 @@
             </div>
             <div class="lede">
               <p>
-                Six steps, once. Custom MCP apps need ChatGPT <strong>Developer mode</strong> on the
-                web. Full write/modify MCP is currently available to Business, Enterprise and Edu;
-                Pro custom MCP is limited to read/fetch access.
+                Follow these six steps once. The pictures show where to click. Start with Core;
+                desktop control is optional.
               </p>
               <button class="btn" id="wizExpand" type="button" hidden>Show all steps</button>
             </div>
@@ -332,8 +331,7 @@
                 <div class="step-body">
                   <h3>Pick a folder to share</h3>
                   <p>
-                    Nothing outside the folders you approve is reachable. Do this first — the tunnel
-                    will not start with nothing to serve.
+                    Choose the folder you want ChatGPT to work in. You can add more folders later.
                   </p>
                   <div class="step-actions">
                     <button class="btn btn-solid" id="wizAddFolder" type="button">
@@ -352,11 +350,12 @@
                 </div>
                 <div class="step-body">
                   <h3>Create a tunnel</h3>
-                  <p>
-                    Open <strong>Tunnels</strong> on the OpenAI platform and create one. Pick the
-                    <strong>same workspace you use in ChatGPT</strong> — a tunnel in another
-                    workspace will not show up later. Then copy its ID.
-                  </p>
+                  <ol class="setup-instructions">
+                    <li>Open Tunnels, click Create and enter a name and description.</li>
+                    <li><strong>At the bottom, select your workspace under ChatGPT workspaces.</strong> Choose the same workspace you use in ChatGPT. You can search by name or workspace ID.</li>
+                    <li>Keep your existing organization selected. Selecting an organization alone does not make the tunnel appear in ChatGPT.</li>
+                    <li>Click Create, copy the new Tunnel ID and paste it below.</li>
+                  </ol>
                   <div class="step-actions">
                     <button
                       class="btn btn-solid"
@@ -366,6 +365,7 @@
                       <svg class="ico" viewBox="0 0 24 24"><use href="#i-out" /></svg>Open Tunnels
                     </button>
                   </div>
+                  <div class="setup-guide" data-setup-guide="tunnel"></div>
                   <div class="field">
                     <label for="tunnelId">Tunnel ID — Core connector</label>
                     <input
@@ -378,20 +378,23 @@
                   <!-- Desktop is a second connector in ChatGPT, so on this method it needs a
                        second tunnel of its own. Hidden unless desktop permissions are on, so
                        nobody is asked to create a tunnel for a feature they never enabled. -->
-                  <div class="field" id="desktopTunnelField" hidden>
-                    <label for="desktopTunnelId">Tunnel ID — Desktop connector <span class="tag">optional</span></label>
-                    <input
-                      id="desktopTunnelId"
-                      type="text"
-                      spellcheck="false"
-                      placeholder="tunnel_0123456789abcdef0123456789abcdef"
-                    />
-                    <p class="hint">
-                      Screen and mouse/keyboard control are a separate connector, so they need a
-                      second tunnel. Create another one and paste its ID here. Leave it empty to
-                      keep desktop control off in ChatGPT.
-                    </p>
-                  </div>
+                  <details class="setup-optional" id="desktopTunnelField" hidden>
+                    <summary>Desktop control <span class="tag is-optional">optional</span></summary>
+                    <div class="field">
+                      <label for="desktopTunnelId">Tunnel ID — Desktop connector</label>
+                      <input
+                        id="desktopTunnelId"
+                        type="text"
+                        spellcheck="false"
+                        placeholder="tunnel_0123456789abcdef0123456789abcdef"
+                      />
+                      <p class="hint">
+                        Screen and mouse/keyboard control are a separate connector, so they need a
+                        second tunnel. Create another one and paste its ID here. Leave it empty to
+                        keep desktop control off in ChatGPT.
+                      </p>
+                    </div>
+                  </details>
                 </div>
               </li>
 
@@ -402,12 +405,12 @@
                 </div>
                 <div class="step-body">
                   <h3>Create an API key</h3>
-                  <p>
-                    Create a key of type <strong>Restricted</strong> and give it only
-                    <strong>Tunnels: Read</strong> and <strong>Tunnels: Use</strong>. Leave
-                    everything else on <em>None</em>. Copy it once — the platform will not show it
-                    again.
-                  </p>
+                  <ol class="setup-instructions">
+                    <li>Open API keys and click Create new secret key.</li>
+                    <li>Leave Owned by set to You. Select your project, for example Default project. A name and expiration are optional.</li>
+                    <li>Under Permissions, choose Restricted. Scroll down to Tunnels and enable Read and Use. Leave everything else at None.</li>
+                    <li>Create the key, copy it and paste it below. You can only copy the secret once.</li>
+                  </ol>
                   <div class="step-actions">
                     <button
                       class="btn btn-solid"
@@ -417,6 +420,7 @@
                       <svg class="ico" viewBox="0 0 24 24"><use href="#i-out" /></svg>Open API keys
                     </button>
                   </div>
+                  <div class="setup-guide" data-setup-guide="key"></div>
                   <div class="field">
                     <label for="apiKey">Tunnel API key</label>
                     <input id="apiKey" type="password" spellcheck="false" placeholder="sk-…" autocomplete="off" />
@@ -435,6 +439,7 @@
                 </div>
                 <div class="step-body">
                   <h3>Start the tunnel</h3>
+                  <p class="setup-important">Click Connect and wait for Connected. The tunnel must be running before you can add the plugin in ChatGPT.</p>
                   <p id="backgroundRunningCopy">
                     Leave it running while you use the connector. It stays available when you close
                     the window.
@@ -454,33 +459,29 @@
                 <div class="step-body">
                   <div class="step-heading">
                     <h3>Add it in ChatGPT</h3>
-                    <button class="btn btn-solid" type="button" data-link="https://chatgpt.com/#settings/Plugins">
+                    <button class="btn btn-solid" type="button" data-link="https://chatgpt.com/plugins">
                       <svg class="ico" viewBox="0 0 24 24"><use href="#i-out" /></svg>Open ChatGPT Plugins
                     </button>
                   </div>
-                  <p>
-                    Turn on <strong>Developer mode</strong> in ChatGPT — currently under
-                    <em>Settings → Apps → Advanced settings</em>, with workspace-managed plans
-                    also exposing custom apps from their Apps area. Then create one app per card
-                    below — Core, plus Desktop if you use it. Configure Plugins from the Plugins page. Each
-                    card is a separate app in ChatGPT:
-                  </p>
-                  <ul class="ticks">
-                    <li>Use the exact name and description from the card — copy them, do not invent your own.</li>
+                  <h4 class="setup-subheading">A · Enable Developer mode</h4>
+                  <p>In ChatGPT, open Settings → Security and login and turn on Developer mode. Settings → Plugins also has a Developer mode shortcut at the bottom.</p>
+                  <div class="setup-guide" data-setup-guide="developer"></div>
+                  <h4 class="setup-subheading">B · Create the Core plugin</h4>
+                  <ol class="setup-instructions">
+                    <li>Open the ChatGPT Plugins page using the button above. Click + at the top right to open New Plugin.</li>
+                    <li>Copy the name and description from the Core card below.</li>
                     <li id="chatgptConn"></li>
-                    <li>
-                      For authentication, scroll to the very bottom and pick
-                      <strong>No authentication</strong>. This app is protected by a secret address,
-                      not by a login.
-                    </li>
-                  </ul>
+                    <li><strong>Under Authentication, choose No Auth.</strong> Do not paste your API key here.</li>
+                    <li>Read and accept the notice, then click Create. Keep the tunnel running while ChatGPT connects.</li>
+                  </ol>
+                  <div class="setup-guide" data-setup-guide="plugin"></div>
                   <!-- One card per connector. The name and description are what ChatGPT matches
                        on when it decides whether to load a connector's tools at all, so both are
                        given as copyable text rather than described. -->
                   <div class="connectors" id="connectorCards"></div>
                   <div class="plugin-permission-step">
                     <strong>Before you start: choose “Allow all actions”</strong>
-                    <p>In ChatGPT, open Settings → Plugins (or Apps), select this plugin, and set its action permissions to <b>Allow all actions</b>. Repeat for the Desktop plugin if you added it.</p>
+                    <p>In ChatGPT, open Settings → Plugins, select this plugin, and set its action permissions to <b>Allow all actions</b>. Repeat for the Desktop plugin if you added it.</p>
                     <p>This lets ChatGPT use the plugin without asking for each action. Otherwise, approval prompts can pause Goal, Loop and agent tasks. Your folder and tool permissions in this app still apply.</p>
                   </div>
                   <div class="step-actions">

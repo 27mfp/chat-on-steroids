@@ -686,6 +686,37 @@ it('guides rootless setup from the capabilities that actually need a filesystem 
   expect(connect.disabled).toBe(false);
 });
 
+it('preserves optional Desktop disclosures and screenshot position across status pushes', async () => {
+  const mounted = await mountChat();
+  const state = structuredClone(mounted.state) as any;
+  state.status.surfaces = [{
+    id: 'desktop', connectorName: 'Desktop', description: 'Desktop control', cardSummary: '', optional: true,
+    available: true, localUrl: null, publicUrl: null, tools: ['observe'], state: 'off', detail: '',
+    lastRequestAt: null, lastToolCallAt: null
+  }];
+  mounted.push(state);
+  const doc = mounted.window.document;
+  const field = doc.getElementById('desktopTunnelField') as HTMLDetailsElement;
+  const card = () => doc.querySelector<HTMLDetailsElement>('#connectorCards details')!;
+  expect(field.hidden).toBe(false);
+  expect(field.open).toBe(false);
+  expect(card().open).toBe(false);
+  field.querySelector('summary')!.click(); card().querySelector('summary')!.click();
+  const guide = doc.querySelector('[data-setup-guide="tunnel"]')!;
+  guide.querySelectorAll<HTMLButtonElement>('button')[1]!.click();
+  const image = guide.querySelector('img')!;
+  mounted.push(structuredClone(state));
+  expect(field.open).toBe(true);
+  expect(card().open).toBe(true);
+  expect(guide.querySelector('img')).toBe(image);
+  expect(image.src).toContain('workspace.png');
+  expect(mounted.calls).toEqual([]);
+  card().querySelector('summary')!.click();
+  mounted.push(structuredClone(state));
+  expect(card().open).toBe(false);
+  expect(field.open).toBe(true);
+});
+
 it('keeps folder access discoverable after setup and navigates without granting access', async () => {
   const addRoot = vi.fn();
   const mounted = await mountChat({ hasApiKey: true }, [], { addRoot });
@@ -906,7 +937,7 @@ it('keeps plugin connection controls out of general Setup and preserves its tunn
   input.value = 'tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   input.dispatchEvent(new mounted.window.Event('change')); await settle();
   expect(mounted.calls.at(-1).tunnel.pluginsTunnelId).toBe(next.config.tunnel.pluginsTunnelId);
-  expect(doc.querySelector('[data-panel="setup"] [data-link="https://chatgpt.com/#settings/Plugins"]')).not.toBeNull();
+  expect(doc.querySelector('[data-panel="setup"] [data-link="https://chatgpt.com/plugins"]')).not.toBeNull();
 });
 
 /**

@@ -565,6 +565,12 @@ The owner is the **durable local session principal** established by correlation.
 keeps that principal, so B can continue A's live terminal without an adoption/move fallback.
 Another session/worker cannot poll or write it. Anonymous process custody is non-adoptable.
 
+A yielded command records a launch acknowledgement, not a permanent claim that the child is
+running. For an exactly attributed launch, the process instance's exit promise revises that
+same canonical call UUID with exit time/code; numeric terminal-id reuse cannot retarget it.
+This revision neither drains output nor creates model work, a new tool call or a turn boundary.
+Legacy launches without exit evidence display `started`; never invent a retrospective success.
+
 `env.ts` is the shared child-environment authority: Windows key names are case-insensitive,
 so use its accessors rather than creating both `Path` and `PATH`. Preserve inherited values.
 `toolchain.ts` fills missing/unreachable Windows JDK/Go configuration conservatively; never
@@ -680,10 +686,12 @@ user correction without waiting. A missing Stop button, Stop-to-Send repaint, or
 finished/stalled observation does not grant that exception. While genuine requests keep arriving,
 the correction remains eligible for injection into its exact turn. A running MCP call vetoes
 browser Send; a later exact work observation revokes pre-send authority and restores injection.
-This also applies when ChatGPT supplies a canonical final or completed `turn_end`: for an
-MCP-backed turn, retain the existing ten-minute Pro / two-minute normal work deadline. New exact
-MCP work renews it. Native completion does not erase that work ownership or manufacture a new
-turn; only exhaustion of the quiet window permits ordinary recovery and idle Loop activation.
+**Final-response correction, 2026-09-13:** the full canonical final response for the exact
+current turn consumes its silence deadline immediately. The ten-minute Pro / two-minute normal
+window is silence recovery only, never a delay after a final. Interim messages, even prose saying
+the work is complete, and Stop/Send controls or a bare `turn_end` do not prove a full final.
+Running local tools remain a separate send guard. A newer question, reopened turn or genuinely
+new tool work invalidates the old final; late recording of pre-final calls cannot renew silence.
 Explicit native files remain browser-only, including an Immediate request temporarily represented
 as after-turn input for upload. Queued checkpoints and generated Loop instructions are different
 from this immediate correction and retain their automatic boundary policy.
@@ -697,19 +705,20 @@ silence clock. An already reloading page retains its existing hydration/cooldown
 Failure/silence-based automatic delivery requires a recorded, exactly attributed local MCP call
 in that source turn. Native ChatGPT tools, request-id sightings without a call, and earlier-turn
 MCP history do not qualify. Refresh and manual sends need no MCP proof. Recheck recorded proof
-for restored tickets and before claims; a genuine final without a live MCP work window retains
-ordinary completion policy.
+for restored tickets and before claims; a genuine full final uses ordinary completion policy.
+A running local tool still vetoes Send.
 
 Queued after-turn work and pending immediate corrections use the normal model's **two-minute**
-silence/refresh authority; Pro uses **ten minutes**. There is **no additional one-minute wait**
-after the acknowledged refresh for Goal/Loop or queued delivery. Thinking failed instead uses
+silence/refresh authority; Pro uses **ten minutes**. Normal models then listen for **one minute
+from the acknowledged refresh** before automatic Goal/Loop or queued delivery. The existing
+activity grant and outbox/Goal listening deadline own this wait. Thinking failed instead uses
 immediate refresh plus **five minutes** for automatic continuation. The final user decision
 retains that original five-minute window; the earlier proposed reduction to two is withdrawn. An ACK
 for that exact refresh files `silenceBoundary` on the next existing outbox row before publication.
 It records source conversation/turn and work sequence; no parallel ticket ledger or scheduler.
 Native Stop prevents claiming/sending and durably extends listening by five minutes, rechecking
-again if it remains busy. Native completion cannot bypass an unexpired MCP work window or the
-existing native-busy deferral.
+again if it remains busy. Only a full canonical final can consume the silence window; native
+control changes cannot bypass it or an existing native-busy delivery deferral.
 New work withdraws an unspent ticket/pre-send claim and rearms the model's silence clock. Authorized
 sends retain exclusive custody until their exact receipt or proven pre-send failure. Source work,
 document epoch, question, draft and native Send are rechecked across preparation awaits. An
@@ -890,7 +899,7 @@ the existing recovery/listening and automatic delivery gates.
 ```text
 userData/sessions/<local-id>/
   events.jsonl          append-oriented tool/turn/error/progress evidence
-  messages/*.json       one atomically replaceable shard per logical native message
+  messages/*.json       one atomic shard per native message or tracked background tool call
   messages.json         legacy map, read during lazy migration
   meta.json             recoverable projection plus durable ownership/project facts
   meta.backup.json      last validated metadata checkpoint
@@ -964,8 +973,16 @@ are recorded for audit but omitted from this tool's own history/search projectio
 Desktop session lists use stable `(updatedAt,id)` pagination. Each session selection loads a
 recent tail and opens at the bottom after its current load renders, including A -> B -> A;
 the previous chat's viewport does not decide the new chat's position. Timeline
-pages older/newer on deliberate scrolling, keeps a bounded 160-row window and viewport
-anchor, and offers Back to latest. Historical browsing does not silently evict the user's
+pages older/newer on deliberate scrolling in 80-record stages, targets 160 resident records,
+and retains the measured viewport plus one screen of surrounding content up to a hard
+320-record staging bound. Dense collapsed activity must not make an 80-record eviction
+discard the reader's visible prose. The existing 2 MiB text/HTML paint budget still applies.
+Overlapping activity groups keep their disclosure identity across page boundaries. The
+viewport owner preserves a surviving visible row and any underfilled tail space; new
+content consumes that space, while an unchanged refresh cannot collapse it. Back to latest
+and session selection clear that reserve. `scripts/verify-history-scroll.cjs` checks native
+Chromium wheel input over a long task, dense activity, reversals and live refreshes.
+Historical browsing does not silently evict the user's
 place on live updates; controls remain live. Selection generation fences every async page.
 Expanded tool arguments/results and Compact & Resume content use the chat pane's vertical
 scrolling, without nested vertical text scrollers. Streaming compaction revisions retain the
@@ -978,6 +995,14 @@ Session `contextTokens` estimates current frontend pressure and resets at durabl
 Lifetime `estimatedTokens` retains historical work. These are app estimates, not ChatGPT's
 private context meter; the composer ring must say so. Exact Pro has a static pressure display
 and is excluded from automatic compaction; manual compaction remains a separate action.
+
+Each MCP return contributes at most **10,000 estimated tokens**, using its original recorded
+text length before applying that cap. Arguments and the activity title retain their separate
+estimates; authored messages are not capped by this rule. This is local estimation policy,
+not independently verified provider truncation. `shared/session.ts::eventTokens()` owns the
+rule for context and Usage. Existing metadata and Usage caches invalidate their old estimates;
+reconstruction preserves rebind resets, applying old-frontend return reductions only to lifetime
+totals. Recorded results, overflow assets and actual MCP responses retain their existing bounds.
 
 `extension/usage.js` observes bounded allowed account-usage responses in MAIN world, including
 already available state; it does not retain raw account payloads. App `session/usage.ts` accepts
@@ -1181,7 +1206,7 @@ permission to reopen the session list. A plain historical chat with no current w
 
 Unattributed recovery keeps a bounded incident per exact unresolved request id, with one
 shared timer. At the first filed unattributed call it freezes the chats then shown Active,
-using the same shared activity predicate as the renderer. One candidate is eligible immediately;
+using the same shared activity predicate as the renderer. One candidate is eligible after 15 seconds;
 multiple candidates get a fixed one-minute window. The second and final attempt is due five
 minutes after that incident began, only if new unattributed work on that same request started
 after the first browser attempt and the request remains unresolved. Another request cannot
@@ -1467,6 +1492,13 @@ the old delayed retry, and a settled refusal waits for a new authorized episode.
 
 Goal gate, objective and Loop prompts are separately configurable. Default helper selection is
 Sol/high in the checked config, but live account metadata governs whether it can be used.
+The default prompts use a shared, concise bullet contract: write instructions to the executor,
+retain the whole original brief plus later user corrections, and assign substantial coherent
+work with implementation, integration and relevant validation together. Worker setup and small
+fixes are steps within that work, not separate rounds. Explicitly narrow user requests remain
+narrow. Goal stops at the requested outcome; Loop raises the quality of the same outcome without
+recursively shrinking to the latest detail or repeating settled reports. Verbatim old defaults
+live in `shared/goal-prompt-history.ts` only for exact-match migration; custom wording is preserved.
 API model discovery is bounded and cached by endpoint/key; a list entry does not prove an
 execution succeeded. Secrets remain in the main process's encrypted store. Custom endpoints
 receive the explicitly assembled reference context; local recording is not a promise that
@@ -1477,11 +1509,23 @@ and final text. **Interim messages remain included when Thinking failed leaves n
 both the ChatGPT helper and API Loop receive the original task, subsequent user corrections and
 canonical interim text once, in chronology. Missing hidden thinking is not permission to drop
 public interim prose; app status/error notices are not model-authored work. Tool rows are opt-in (`includeToolCalls`, default Off); finish-control calls do
-not recursively dominate the reference. Preserve original task/steering and committed handoff
-provenance under the message budget. Helper prefix digests prove whether a bounded delta is
+not recursively dominate the reference. Read user-reference history separately so assistant/tool
+traffic cannot evict middle corrections before selection. Preserve original task/steering and
+committed handoff provenance under the message budget; user references have a larger per-message
+allowance and explicit clipping. Exact same-session outbox `finishOwner` identities label known
+automatic messages; unknown native user-role rows do not prove human authorship. Both API and
+browser receive reference data rather than the helper's own prior assistant turns. Temporary
+planners retain their staged-workflow role. Browser budgeting includes prompts and JSON escaping
+inside the complete 96,000-character envelope. Helper prefix digests prove whether a bounded delta is
 valid; changed history/instructions replace context in the same helper instead of spawning
 another helper automatically. Clear temporary-planner answer content before durable state
 publication; it is not a normal recorded executor task.
+
+The app's existing Goal/Loop composer row shows answer settling and real waiting reasons before
+a draft exists, then the generated continuation text and delivery state. Both app controls and
+the extension project the same pending reply and activity/listening deadlines. Display countdowns
+grant no execution authority. A full canonical final consumes silence immediately; interim prose
+and Stop/Send changes never do. Failed/silent views retain their separate recovery policy.
 
 Provider progress updates one existing timeline row and is never sendable text. Validate the
 final bounded decision schema before publication. Goal may return stop/no reply. Loop requires
@@ -1508,6 +1552,16 @@ No arbitrary IPC invocation, Node access, filesystem path opening or renderer-si
 Pushes and async loads are scoped to selection/draft generation; a late load must not overwrite
 focused edits or a newer A → B → A view.
 
+First-run Setup keeps the six-step flow, with reviewed screenshots in `renderer/setup-images/`
+and translated click overlays/galleries in `renderer/setup-guide.ts`. Sensitive identifiers must
+be removed from asset pixels before inclusion; an HTML overlay is never a privacy boundary.
+The guide names the bottom ChatGPT workspaces field, restricted Tunnels Read + Use, a running
+tunnel before plugin creation, Settings → Security and login → Developer mode, Plugins → +,
+and Authentication → No Auth. Desktop tunnel entry and its connector card start collapsed with
+an explicit optional label; status pushes preserve disclosure state and do not enable it.
+`scripts/verify-setup-guide.cjs` checks production renderer modules/styles in an isolated UI-only
+Electron fixture, including image navigation, zoom, translated overlays and native enlargement.
+
 The sidebar groups local projects/sessions, exposes worker state and retains deliberate width
 and expansion preferences. The chat keeps the current input queue/plan visible alongside a
 paged transcript. Main owns durable mutation acknowledgements; renderer optimism is not a
@@ -1515,6 +1569,23 @@ receipt. Native edit context menus respect the focused editable control and sele
 The plan heading is a native disclosure with a visible open/closed chevron. A newly opened
 chat starts with its plan collapsed. Collapsing it returns height to the conversation;
 status updates preserve the user's current disclosure state.
+
+The recovery row above Goal/Loop shows read-only countdowns from `bridge.ts::sessionControlsFor`:
+confirmed Thinking-failed listening, an outbox/Goal native-busy deferral, and each unresolved
+attribution incident's exact candidate deadline. `renderer/recovery.ts` updates only the seconds
+using the existing visible-chat clock; zero says checking/pending, never sent/reloaded. Fresh
+work or attribution removes the relevant countdown, and native busy projects the same owner's
+extended deadline. Pro silence becomes visible after five minutes without work and counts
+down to the existing ten-minute deadline; fresh work hides it for the next five minutes.
+The normal two-minute silence clock stays hidden; its confirmed reload reveals the one-minute
+listening countdown. `visibleAt` lets the existing renderer clock reveal a Pro row without a
+new backend scheduler. Selection generations fence delayed controls and clear old-chat timers.
+Listening rows name the next existing step: queued input takes priority, otherwise the active
+Goal or Loop obligation. This is a projection of delivery ownership, never another trigger.
+After attribution's first attempt, every still-unproven member of its original cohort keeps
+the countdown to the incident's existing five-minute end, even without another unknown call.
+That row says awaiting attribution/check, since the existing retry conditions still govern
+whether another reload is allowed. Exact MCP proof removes only its chat; later chats stay out.
 
 Session metadata owns `titleSource` (authored fallback, provider, manual). The preview uses only
 the first authored user message, at one 80-character bound; injected instructions/AGENTS frames

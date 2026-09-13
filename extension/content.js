@@ -5709,10 +5709,10 @@
    * contract sends the rewrite under `origin`: the repair row that turns from "Trying to
    * reload…" into "Reloaded…" is one row, and the page can only show that if it takes it.
    */
-  const UPSERT_KINDS = new Set(['progress', 'page_tool']);
+  const UPSERT_KINDS = new Set(['progress', 'page_tool', 'tool_call']);
 
   /** What a stream entry currently says, whichever field its kind keeps it in. */
-  const snapshotText = (entry) => (entry ? (entry.kind === 'page_tool' ? entry.label : entry.text) : undefined);
+  const snapshotText = (entry) => (entry ? (entry.kind === 'tool_call' ? JSON.stringify(entry.summary) : entry.kind === 'page_tool' ? entry.label : entry.text) : undefined);
 
   let settingsPulling = false;
 
@@ -5824,6 +5824,7 @@
       const isWork = (entry) =>
         entry &&
         entry.turnId === turnId &&
+        !(entry.kind === 'tool_call' && entry.process && entry.process.completedAt !== undefined) &&
         !(entry.kind === 'assistant_message' && (entry.final === true || entry.state === 'final')) &&
         !(fiberSettled?.reason === 'thinking_failed' && entry.time <= fiberSettled.endedAt) &&
         !browserRepairRow(entry) &&
@@ -5867,7 +5868,7 @@
         // per redraw, and one tool row instead of one per relabel. So a repeat of a seq we
         // hold replaces it rather than being discarded as already seen.
         //
-        // Both kinds, not just progress. `page_tool` supersession was added on the app side
+        // Native labels and process statuses, not just progress. `page_tool` supersession was added on the app side
         // and then dropped here, because a held entry of any other kind fell straight
         // through this guard: `Inspecting files` could never become `Inspected files`.
         const held = streamBySeq.get(seq);
@@ -5890,7 +5891,8 @@
         // Ask for what comes *after* this one next time. Asking from `seq` itself is the
         // bug that made the feed repeat its last entry forever.
         if (seq >= since) since = seq + 1;
-        if (bySeq.has(seq)) continue;
+        const prior = bySeq.get(seq);
+        if (prior && (prior.callId !== entry.callId || snapshotText({ ...prior, kind: 'tool_call' }) === snapshotText({ ...entry, kind: 'tool_call' }))) continue;
         bySeq.set(seq, entry);
         added++;
       }
@@ -7752,7 +7754,12 @@
       return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
     }
     if (goal.phase === 'settling') {
-      return { stage: 'Checking the answer is finished', detail: '', body: '', kind: 'goal', ...bar(0) };
+      const wait = goal.wait;
+      const seconds = wait?.until ? Math.max(0, Math.ceil((wait.until - Date.now()) / 1000)) : 0;
+      const detail = seconds ? `Checking again in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
+      const stage = wait?.reason === 'quiet' ? 'Waiting for tool inactivity' :
+        wait?.reason === 'tools' ? 'Waiting for running tools' : wait?.reason === 'listening' ? 'Waiting for activity after recovery' : 'Checking the answer is finished';
+      return { stage, detail, body: '', kind: 'goal', ...bar(0) };
     }
     if (goal.phase === 'sending' && draft && draft.reply) {
       return { stage: 'Sending it to ChatGPT', detail: '', body: draft.reply, kind: 'goal', ...bar(3) };

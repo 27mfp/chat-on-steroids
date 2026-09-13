@@ -4,6 +4,7 @@ import { initUsage, refreshUsage } from './usage.js';
 import { initSidebarResize } from './sidebar-resize.js';
 import { initPlugins, applyPluginsState } from './plugins.js';
 import { initBrowserPreferences } from './browser-preferences.js';
+import { initSetupGuide } from './setup-guide.js';
 /**
  * Renderer. No Node, no filesystem, no network — everything goes through window.api.
  *
@@ -43,6 +44,7 @@ declare global {
 
 const api = window.api;
 initLanguage();
+initSetupGuide();
 
 /** Same shape the platform uses; mirrored here only to grey out step 2 until it is valid. */
 const TUNNEL_ID_PATTERN = /^tunnel_[0-9a-f]{32}$/;
@@ -1031,7 +1033,7 @@ function apply(next: AppState): void {
   ui(chatgptNote, 'textContent', () => status.lastRequestAt === null
       ? t("ChatGPT has not called this app yet.")
       : status.lastToolCallAt === null
-        ? t("ChatGPT connected {0} but has never run a tool. If it says “does not support developer MCPs”, switch Developer mode back on in ChatGPT → Settings → Apps & Connectors → Advanced.", [ago(status.lastRequestAt)])
+        ? t("ChatGPT connected {0} but has never run a tool. Check Developer mode in ChatGPT → Settings → Security and login.", [ago(status.lastRequestAt)])
         : unverified.length > 0
           ? // One connector working is not the whole setup. Naming the missing one is the
             // difference between "something is off" and knowing what to go and create.
@@ -1045,7 +1047,8 @@ function apply(next: AppState): void {
   // so its card must survive the tidy collapse instead of disappearing behind "Show all
   // steps" — otherwise a half-done Desktop setup reads as a complete one.
   cards.classList.toggle('has-unfinished', unverified.length > 0);
-  cards.replaceChildren(...connectorCards(next));
+  const desktopExpanded = cards.querySelector<HTMLDetailsElement>('details')?.open ?? false;
+  cards.replaceChildren(...connectorCards(next, desktopExpanded));
 
   // Step marks: everything before the first unfinished step counts as done.
   const order = ['folder', 'tunnel', 'key', 'connect', 'chatgpt', 'browser'];
@@ -1135,17 +1138,21 @@ function copyRow(label: string | (() => string), value: string, what: string): H
  * connector called "my pc" with a description the user invented is one the model may
  * never reach for, and that failure looks exactly like the app being broken.
  */
-function connectorCards(next: AppState): HTMLElement[] {
+function connectorCards(next: AppState, desktopExpanded: boolean): HTMLElement[] {
   const { status, config } = next;
   return status.surfaces
     .filter((surface) => surface.id !== 'plugins' && (surface.id !== 'desktop' || (next.platform?.desktopAutomation ?? true)))
     .map((surface) => {
-    const card = el('div', `connector is-${surface.state}`);
+    const optional = surface.id === 'desktop';
+    const card = optional ? document.createElement('details') : el('div');
+    card.className = `connector is-${surface.state}`;
+    if (optional) (card as HTMLDetailsElement).open = desktopExpanded;
 
-    const head = el('div', 'connector-head');
+    const head = optional ? document.createElement('summary') : el('div');
+    head.className = 'connector-head';
     head.append(
       el('h4', '', surface.connectorName),
-      el('span', 'tag', () => t(surface.optional ? 'optional' : 'required')),
+      el('span', `tag${surface.optional ? ' is-optional' : ''}`, () => t(surface.optional ? 'optional' : 'required')),
       el('span', `pill is-${surface.state}`, () => t(SURFACE_STATE_TEXT[surface.state]))
     );
     card.append(head, el('p', 'hint', () => t(surface.cardSummary)));
