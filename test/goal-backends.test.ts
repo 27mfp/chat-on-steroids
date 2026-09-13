@@ -151,6 +151,7 @@ describe('Goal decision backends', () => {
     await recordLoopMcpProof(session.id, 'failed-turn');
     goal.startGoalDraft({ conversationId: id, sessionId: session.id, turnId: 'failed-turn' });
     expect((await settled(id)).stage).toBe('ready');
+    if (backend === 'chatgpt') expect(browser.request.mock.calls[0]?.[2]).toMatchObject({ lifetime: 'temporary-planner', conversationId: null });
     const payload = backend === 'chatgpt' ? browser.request.mock.calls[0]?.[0]
       : String((fetcher.mock.calls[0] as unknown as [unknown, RequestInit])?.[1]?.body);
     for (const text of ['Build the individual stage layers', 'Geometry is still shallow', 'Use no textures or color']) expect(payload).toContain(text);
@@ -172,7 +173,7 @@ describe('Goal decision backends', () => {
     expect(await settled(id)).toMatchObject({ turnId: 'source-final', stage: 'ready' });
     expect(browser.request).toHaveBeenCalledTimes(2);
   });
-  it('reuses its durable helper with only proven incremental source messages after restart', async () => {
+  it('uses fresh temporary helpers with full reference after restart and never revives historical helpers', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, goal: { ...config.goal, enabled: true, backend: 'chatgpt' } });
     const id = 'incremental-source';
@@ -183,7 +184,7 @@ describe('Goal decision backends', () => {
     });
     goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'first' });
     expect((await settled(id)).stage).toBe('ready');
-    expect(browser.request.mock.calls[0]?.[2]).toEqual({ sourceSessionId: sessionId, conversationId: null, model: 'gpt-5.6-sol', reasoningEffort: 'high', publish: expect.any(Function) });
+    expect(browser.request.mock.calls[0]?.[2]).toEqual({ sourceSessionId: sessionId, conversationId: null, lifetime: 'temporary-planner', model: 'gpt-5.6-sol', reasoningEffort: 'high', publish: expect.any(Function) });
     expect(browser.request.mock.calls[0]?.[0]).toContain('Original reference only');
     const saved = goal.snapshotGoalSwitches();
     goal.resetGoalStateForTests();
@@ -192,15 +193,15 @@ describe('Goal decision backends', () => {
       message: { text: 'New response only', chars: 17, truncated: false } });
     goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'second' });
     expect((await settled(id)).stage).toBe('ready');
-    expect(browser.request.mock.calls[1]?.[2]).toMatchObject({ conversationId: 'incremental-helper', sourceSessionId: sessionId });
+    expect(browser.request.mock.calls[1]?.[2]).toMatchObject({ conversationId: null, lifetime: 'temporary-planner', sourceSessionId: sessionId });
     expect(browser.request.mock.calls[1]?.[0]).toContain('New response only');
-    expect(browser.request.mock.calls[1]?.[0]).not.toContain('Original reference only');
-    expect(browser.request.mock.calls[1]?.[0]).toContain('Append these new source messages');
+    expect(browser.request.mock.calls[1]?.[0]).toContain('Original reference only');
+    expect(browser.request.mock.calls[1]?.[0]).not.toContain('Append these new source messages');
     await saveConfig({ ...config, goal: { ...config.goal, enabled: true, backend: 'chatgpt', prompt: 'Changed continuation instructions' } });
     goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'third' });
     expect((await settled(id)).stage).toBe('ready');
     expect(browser.request.mock.calls[2]?.[0]).toContain('Original reference only');
-    expect(browser.request.mock.calls[2]?.[2]).toMatchObject({ conversationId: 'incremental-helper' });
+    expect(browser.request.mock.calls[2]?.[2]).toMatchObject({ conversationId: null, lifetime: 'temporary-planner' });
     expect(fetch).not.toHaveBeenCalled();
   });
   it('bounds the complete browser envelope while keeping a large original brief and newest result', async () => {
@@ -413,6 +414,7 @@ it('generates a validated staged plan through the existing browser helper withou
   expect(await goal.draftTaskPlan('Build the feature and test it', 'chatgpt')).toEqual(['Implement the requested feature', 'Test every acceptance criterion']);
   expect(browser.request).toHaveBeenCalledTimes(1);
   expect(browser.request.mock.calls[0]![0]).toContain('Build the feature and test it');
+  expect(browser.request.mock.calls[0]![2]).toMatchObject({ lifetime: 'temporary-planner', conversationId: null });
   expect(browser.request.mock.calls[0]![0]).toContain('Produce the requested staged workflow');
   expect(browser.request.mock.calls[0]![0]).not.toContain('You only write the next prompt');
   expect(browser.request.mock.calls[0]![0]).not.toMatch(/session_finish|minutes before/i);

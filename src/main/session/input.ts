@@ -1084,7 +1084,7 @@ export function failBrowserInput(id: string, owner: string, error: string): Prom
     await commit(current.map((row) => sameDelivery(entry, row) ? pickupCancelled
       ? withoutSilenceClaim(row, row === entry && preserveBoundary)
       : { ...row, state: entry.companionInputId ? 'cancelled' : 'failed', error: error.slice(0, 200) } : row));
-    decisionWaiters.get(id)?.reject(new Error('goal_browser_send_failed'));
+    decisionWaiters.get(id)?.reject(new Error('goal_browser_send_failed: ' + error.slice(0, 200)));
     decisionWaiters.delete(id);
     return true;
   });

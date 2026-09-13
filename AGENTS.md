@@ -282,6 +282,16 @@ legacy omitted fields and malformed-file recovery are three different cases. Use
 not be widened because a newer version added a field. Read-only derives from the write-capability
 set; adding a new mutating capability must make it read-only-blocked automatically.
 
+Setup profiles switch only Core/Desktop/Plugins tunnel IDs and the tunnel API-key identity.
+The active IDs remain in `config.tunnel`; `config.setupProfiles` contains inactive snapshots
+only. `setup-profiles.ts` switches both in one queued config commit, incrementing `profileEpoch`.
+Keys remain in `secrets.bin`: the original profile keeps `openaiApiKey`, others use `setup:<id>`.
+Settings writes fence changed tunnel IDs by profile identity/epoch; key writes name their exact
+profile. Connection lifecycle reuses the selected key and reconnects when the OpenAI profile
+epoch changes, even if its tunnel ID matches. Roots, chats, models and other settings stay shared.
+Removing a profile removes its inactive snapshot and encrypted key; removing the active profile
+selects a survivor in the same config commit. The last profile cannot be removed.
+
 Renderer settings save `{base, patch}`. Main performs a field-wise three-way merge so an unchanged
 form field cannot undo a newer browser-side setting. Renderer saves also serialize snapshots
 from the latest requested state, preserving fast successive edits. Disable side effects are
@@ -819,6 +829,11 @@ Planning belongs to the originating draft key. Navigation does not cancel it or 
 result. Editing a pending task cancels that exact request; object identity rejects late results.
 Progress/error/retry belongs to the same invocation. `runTaskRequest()` coalesces a repeated id
 with the same fingerprint and retries only classified pre-delivery failures within its bounds.
+Once a successful result owns the captured task, clear its unchanged source composer draft,
+including a background draft after navigation. Do this before awaiting queue admission, so a
+new correction typed during that wait survives. Failed/cancelled/stale generation keeps the
+draft. Enter submits a prepared plan even when the composer is empty; Shift+Enter and IME
+composition retain their ordinary editing behavior.
 
 - **New chat:** the completed plan stays editable until explicit Send/cancel/New chat reset.
   Clearing the composer keeps its captured objective. Send freezes the original objective and
@@ -826,7 +841,7 @@ with the same fingerprint and retries only classified pre-delivery failures with
   the first receipt creates the concrete local session. Until then, the dock projects them
   from that same input. Retry must retain objective + all stages, never restore only stage one.
 - **Existing session:** completion atomically admits all finish checkpoints into the durable
-  outbox immediately. Composer text/attachments are not sent by that admission, and clearing
+  outbox immediately. New composer text/attachments are not sent by that admission, and clearing
   the composer cannot delete the checkpoints. Edit/delete/reorder uses the ordinary queue.
   Failed admission keeps the editable result for retry in its originating session.
 - **Displayed `update_plan`:** `plan-tool.ts` writes one whole `plan.json` under the exact
@@ -1485,10 +1500,10 @@ the old delayed retry, and a settled refusal waits for a new authorized episode.
 
 | Backend/role | Behavior |
 | --- | --- |
-| ChatGPT decision helper | Default driver backend. One reusable helper per source session/role; receives reference history and outputs a decision, never executes that history. |
+| ChatGPT decision helper | Default driver backend. Each Goal/Loop decision uses a Temporary Chat with bounded reference history; outputs a decision, never executes that history. |
 | API driver | OpenRouter-compatible default or explicit compatible endpoint/model/key. Supports bounded streamed progress and validated final decision. |
 | Goal templates | Offline explicit terminal-marker policy; only Goal supports this backend. Missing/ambiguous expected markers pause rather than infer completion from prose. |
-| Temporary planner | Captures a new workflow for the user, then retires with exact idle/draft proof; distinct from the persistent decision helper. |
+| Temporary planner | Captures a new workflow for the user in Temporary Chat. Shares temporary transport with decision helpers while retaining its staged-workflow role. |
 
 Goal gate, objective and Loop prompts are separately configurable. Default helper selection is
 Sol/high in the checked config, but live account metadata governs whether it can be used.
@@ -1516,16 +1531,35 @@ allowance and explicit clipping. Exact same-session outbox `finishOwner` identit
 automatic messages; unknown native user-role rows do not prove human authorship. Both API and
 browser receive reference data rather than the helper's own prior assistant turns. Temporary
 planners retain their staged-workflow role. Browser budgeting includes prompts and JSON escaping
-inside the complete 96,000-character envelope. Helper prefix digests prove whether a bounded delta is
-valid; changed history/instructions replace context in the same helper instead of spawning
-another helper automatically. Clear temporary-planner answer content before durable state
-publication; it is not a normal recorded executor task.
+inside the complete 96,000-character envelope. Each browser decision receives its complete bounded
+reference; there is no reusable-helper delta context. The existing `temporary-planner` transport
+owns all three helper modes. Verify native Temporary Chat before sending. Accepted helper output
+immediately retires its exact tab after fresh document/epoch, idle, pin and draft checks; cleanup
+does not wait for a replacement tab. Historical helper role fences remain valid. Clear temporary
+answer content before durable state publication; it is not a normal recorded executor task.
 
 The app's existing Goal/Loop composer row shows answer settling and real waiting reasons before
 a draft exists, then the generated continuation text and delivery state. Both app controls and
 the extension project the same pending reply and activity/listening deadlines. Display countdowns
-grant no execution authority. A full canonical final consumes silence immediately; interim prose
-and Stop/Send changes never do. Failed/silent views retain their separate recovery policy.
+grant no execution authority. A full canonical final consumes silence immediately, including an
+exact final first backfilled after a completed turn; interim prose and Stop/Send changes never do.
+A completed MCP-backed response without final text is a recovery indication, not a terminal error:
+normal chats use two minutes before reload and one minute of listening after confirmed reload.
+Expired recovery debt goes directly to decision preparation without another Answer Settling wait.
+Fresh work invalidates that debt and any captured draft, including across async activity reads.
+Pro retains its existing ten-minute silence and five-minute listening/deferral policy.
+If the source reports work before a prepared continuation reaches native Send, abandon that
+exact draft without acknowledging its obligation as handled. The existing pending reply owns
+a fresh minimum two-minute wait (Pro: five minutes); retries prepare a new decision. Repeated
+reports for the retired token cannot extend the deadline or revoke a replacement. The browser's
+bounded receipt journal distinguishes pre-send busy cancellation from successful delivery so a
+lost deferral response cannot resurrect the old text. App/web name this wait explicitly.
+
+Goal/Loop/planner failures retain machine codes for retry/ownership but publish a separate readable
+explanation in app and browser. Missing MCP evidence explains that the previous response made no
+local tool call, so lost tool connectivity cannot be established; Loop remains enabled. Do not
+claim login is missing or the tunnel is off without evidence. Distinguish input size, helper output
+size, provider failures and uncertain delivery. Browser error text wraps instead of truncating.
 
 Provider progress updates one existing timeline row and is never sendable text. Validate the
 final bounded decision schema before publication. Goal may return stop/no reply. Loop requires
@@ -1553,19 +1587,37 @@ Pushes and async loads are scoped to selection/draft generation; a late load mus
 focused edits or a newer A → B → A view.
 
 First-run Setup keeps the six-step flow, with reviewed screenshots in `renderer/setup-images/`
-and translated click overlays/galleries in `renderer/setup-guide.ts`. Sensitive identifiers must
+and translated numbered highlights in `renderer/setup-guide.ts`. Sensitive identifiers must
 be removed from asset pixels before inclusion; an HTML overlay is never a privacy boundary.
 The guide names the bottom ChatGPT workspaces field, restricted Tunnels Read + Use, a running
 tunnel before plugin creation, Settings → Security and login → Developer mode, Plugins → +,
 and Authentication → No Auth. Desktop tunnel entry and its connector card start collapsed with
 an explicit optional label; status pushes preserve disclosure state and do not enable it.
+One tunnel image and one Security and login image avoid duplicate paths. Both plugin images
+remain visible together, side by side when space permits and stacked at narrow widths, with
+translated written callouts anchored to the highlighted controls and native enlargement. Required Core tunnel/API-key fields
+have a subtle blue empty state; a stored key satisfies it without exposing the secret. Optional
+Desktop fields are not marked required. Setup assets contain no embedded image metadata.
 `scripts/verify-setup-guide.cjs` checks production renderer modules/styles in an isolated UI-only
-Electron fixture, including image navigation, zoom, translated overlays and native enlargement.
+Electron fixture, including simultaneous images, zoom, translated labels and native enlargement.
 
 The sidebar groups local projects/sessions, exposes worker state and retains deliberate width
-and expansion preferences. The chat keeps the current input queue/plan visible alongside a
+and expansion preferences. Project chat titles align with the project name. Groups initially
+show five parent chats; Show more adds eight, preserving expanded worker children and the
+selected task. `renderer/sidebar-order.ts` owns a bounded localStorage presentation order:
+dragging or Alt+Up/Down moves a parent and its worker children within its current project or
+unfiled group. A drag beyond the group clamps to its first/last visible slot; it cannot change
+project ownership. Pointer custody defers row replacement during live refresh and revalidates
+membership before saving. Off-page order survives partial list refreshes.
+The chat keeps the current input queue/plan visible alongside a
 paged transcript. Main owns durable mutation acknowledgements; renderer optimism is not a
 receipt. Native edit context menus respect the focused editable control and selection.
+Setup's Show/Hide guide button stays available even while setup is incomplete. Manual collapse
+survives status pushes. Profile management stays out of first-run Setup: a compact row below
+Language in Appearance has a dropdown, a plus button with a name dialog and a delete button
+on each profile entry. New chat uses the existing
+pencil icon, with white foreground in dark mode. `scripts/verify-sidebar-setup.cjs` exercises
+real Electron pointer input and layout against isolated production renderer modules.
 The plan heading is a native disclosure with a visible open/closed chevron. A newly opened
 chat starts with its plan collapsed. Collapsing it returns height to the conversation;
 status updates preserve the user's current disclosure state.
@@ -1577,8 +1629,11 @@ using the existing visible-chat clock; zero says checking/pending, never sent/re
 work or attribution removes the relevant countdown, and native busy projects the same owner's
 extended deadline. Pro silence becomes visible after five minutes without work and counts
 down to the existing ten-minute deadline; fresh work hides it for the next five minutes.
-The normal two-minute silence clock stays hidden; its confirmed reload reveals the one-minute
-listening countdown. `visibleAt` lets the existing renderer clock reveal a Pro row without a
+The normal two-minute silence clock usually stays hidden; its confirmed reload reveals the
+one-minute listening countdown. A completed page boundary without a canonical final immediately
+reveals the existing normal/Pro silence deadline in app and browser. New MCP activity removes this
+special early visibility and restores the usual two/five-minute delay; it does not create a second
+countdown authority. `visibleAt` lets the existing renderer clock reveal a Pro row without a
 new backend scheduler. Selection generations fence delayed controls and clear old-chat timers.
 Listening rows name the next existing step: queued input takes priority, otherwise the active
 Goal or Loop obligation. This is a projection of delivery ownership, never another trigger.
@@ -1605,6 +1660,9 @@ with the selected locale in `cos.ui.language`. Changing language repaints owned 
 retaining drafts/selections; never translate authored messages, provider text or file paths.
 Authored prose uses automatic text direction; shell/code remain LTR with logical layout edges.
 Theme and layout preferences do not change backend authority.
+Settings places ChatGPT model defaults second and Workers & recovery third, after Continuation
+sources; Appearance and its language selector come last. The connector-instructions editor
+is removed. Settings saves preserve existing stored MCP instructions for compatibility.
 Dropdowns use native customizable selects (`appearance: base-select`) with theme-matched
 top-layer pickers, wrapping option labels and native keyboard/focus semantics. Pro Loop delivery
 stacks its label and full-width control within the composer menu. `scripts/verify-dropdown-layout.cjs`

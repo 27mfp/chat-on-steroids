@@ -42,6 +42,7 @@
  */
 
 import { requestBrowserDecision, authorizeBrowserHelperRetry } from './session/input.js';
+import { goalErrorMessage } from '../shared/goal-errors.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, userPromptText } from '../shared/user-prompt.js';
 import { planProgressText, type TaskProgressUpdate } from '../shared/task-progress.js';
 import { TaskRequestError } from './task-request.js';
@@ -328,8 +329,10 @@ export interface GoalDraftView {
   text: string;
   /** The message to type, present only at `ready`. */
   reply: string;
-  /** A short machine-readable reason, shown by the page when the stage is `failed`. */
+  /** Machine-readable reason, retained for diagnostics and retry classification. */
   error: string | null;
+  /** Plain explanation for both browser and desktop presentation. */
+  message?: string;
   /**
    * Whether this failure is one the same request could still answer.
    *
@@ -1059,6 +1062,7 @@ function view(draft: GoalDraft): GoalDraftView {
     // is history, and a page that polls again must not find a message to type a second time.
     reply: draft.stage === 'ready' && !draft.acknowledged ? draft.reply : '',
     error: draft.error,
+    ...(draft.error ? { message: goalErrorMessage(draft.error) } : {}),
     retryable: draft.stage === 'failed' && retryableGoalFailure(draft.error ?? '')
   };
 }
@@ -1291,13 +1295,26 @@ export async function withdrawSilenceGoalReplyNow(conversationId: string, replyI
 }
 
 /** Native busy or a confirmed failure defers this exact ticket, never a new one. */
-export async function deferSilenceGoalReplyNow(conversationId: string, turnId: string, listenUntil?: number): Promise<boolean> {
+export async function deferSilenceGoalReplyNow(conversationId: string, turnId: string, listenUntil?: number,
+  prepared?: { token: string; clientId: string }): Promise<boolean> {
   const reply = goalReplies.get(conversationId);
-  if (!reply || reply.state !== 'pending' || reply.turnId !== turnId || !reply.silenceSourceTurnId) return false;
+  if (!reply || reply.state !== 'pending' || reply.turnId !== turnId || (!reply.silenceSourceTurnId && !prepared)) return false;
+  if (prepared) {
+    const draft = drafts.get(conversationId);
+    if (!draft || draft.token !== prepared.token || draft.clientId !== prepared.clientId ||
+        draft.turnId !== turnId || draft.acknowledged || draft.stage !== 'ready') return false;
+    // Renewed native work retires only this prepared text, never its obligation.
+    // Remove authority before yielding; old-token duplicates cannot move the clock.
+    draft.acknowledged = true;
+    draft.abort?.abort();
+    drafts.delete(conversationId);
+    notifyGoalChange();
+  }
   if (listenUntil === undefined && (reply.listenUntil ?? 0) > Date.now()) return true;
   const deadline = listenUntil ?? Date.now() + 5 * 60_000;
   if ((reply.listenUntil ?? 0) >= deadline) return true;
   reply.listenUntil = deadline;
+  notifyGoalChange();
   try { await writeDurableNow(GOAL_REPLIES_STATE, snapshotGoalReplies()); }
   catch (error) { persistGoalRepliesSoon(); throw error; }
   return goalReplies.get(conversationId) === reply;
@@ -1486,10 +1503,8 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
     : GOAL_REFERENCE_CONTRACT;
   if (request.backend === 'chatgpt') {
     const protocol = request.mode === 'loop' ? LOOP_OUTPUT_PROTOCOL : GOAL_OUTPUT_PROTOCOL;
-    const helper = request.sourceSessionId ? [...goalSwitches].find(([, row]) => row.role === 'decision' && row.sourceSessionId === request.sourceSessionId) : undefined;
-    const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const introduction = 'Return one JSON object: {"action":"stop" or "continue","reply":"the message"}. ' + referenceContract;
-    const replacement = 'Replace the previous reference transcript with this complete source transcript.';
+    const replacement = 'Use this complete source transcript as reference data.';
     const render = (messages: ChatMessage[], direction = replacement): string => [...request.system, protocol,
       introduction, direction, '<conversation>', ...messages.map(message => JSON.stringify(message)), '</conversation>', request.trailer].join('\n\n');
     // The browser's authored-message limit includes instructions, escaping and framing.
@@ -1514,33 +1529,15 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
       omitted = true;
     }
     const direction = omitted ? incomplete : replacement;
-    const instructions = hash([request.system, protocol, referenceContract, direction, request.trailer, settings.helperModel, settings.helperReasoning]);
-    const prior = helper?.[1].context;
-    // A full-prefix digest proves the helper already received precisely this recording.
-    // Compaction, edited history or changed instructions replace the reference context in
-    // the same helper chat; they never silently append to a different source or mint tabs.
-    const incremental = prior && prior.instructions === instructions && prior.count <= reference.length
-      && prior.hash === hash(reference.slice(0, prior.count));
-    const messages = incremental ? reference.slice(prior.count) : reference;
-    const prompt = render(messages, incremental ? 'Append these new source messages to the previous reference transcript.' : direction);
-    const decision = normalizeGoalDecision(await requestBrowserDecision(prompt, request.signal, {
-      sourceSessionId: request.sourceSessionId, conversationId: helper?.[0] ?? null,
-      lifetime: request.lifetime,
+    // Each decision owns one Temporary Chat and the complete bounded reference.
+    // Historical helper identities remain fenced, but never receive new requests.
+    const decision = normalizeGoalDecision(await requestBrowserDecision(render(reference, direction), request.signal, {
+      sourceSessionId: request.sourceSessionId, conversationId: null,
+      lifetime: 'temporary-planner',
       publish: request.publish,
       model: settings.helperModel ?? 'gpt-5.6-sol', reasoningEffort: settings.helperReasoning ?? 'high'
     }), false);
     request.signal.throwIfAborted();
-    if (request.sourceSessionId && (decision.action === 'continue' || decision.action === 'stop')) {
-      await serialGoalSwitch(async () => {
-        const bound = [...goalSwitches].find(([, row]) => row.sourceSessionId === request.sourceSessionId);
-        if (!bound) return;
-        const [id, row] = bound;
-        const next = { ...row, context: { count: reference.length, hash: hash(reference), instructions } };
-        goalSwitches.set(id, next);
-        try { await writeDurableNow(GOAL_SWITCHES_STATE, snapshotGoalSwitches()); }
-        catch (error) { goalSwitches.set(id, row); writeDurableSoon(GOAL_SWITCHES_STATE, snapshotGoalSwitches()); throw error; }
-      });
-    }
     return decision;
   }
   let baseUrl: string;

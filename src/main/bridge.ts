@@ -1,4 +1,5 @@
 import { conversationProgress } from './session/progress.js';
+import { goalErrorMessage } from '../shared/goal-errors.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, userPromptText } from '../shared/user-prompt.js';
 import { prepareSessionPrompt } from './session/prompt.js';
 import { pendingChatModelRequest, observeChatModels, requestChatModels } from './chat-models.js';
@@ -623,6 +624,14 @@ export async function unpair(): Promise<void> {
 
 // ------------------------------------------------------------------ helpers
 
+/** Goal wire errors keep their code/retry policy and add a user-facing explanation. */
+function goalJson(res: http.ServerResponse, status: number, body: unknown, origin: string | null): void {
+  if (body && typeof body === 'object' && 'error' in body && typeof body.error === 'string' && !('message' in body)) {
+    body = { ...body, message: goalErrorMessage(body.error) };
+  }
+  json(res, status, body, origin);
+}
+
 function json(res: http.ServerResponse, status: number, body: unknown, origin: string | null): void {
   const payload = JSON.stringify(body);
   const headers: Record<string, string> = {
@@ -1100,7 +1109,7 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
     finishGoalDraft: getSessionFinishDraft(sessionId, activeTurnId),
     finishWaiting,
     goalDraft: draft ? { stage: draft.stage, model: draft.model, text: draft.text.slice(-8000), error: draft.error } : null,
-    goalWait: !blocked && !draft && goalActiveFor(id) ? goalWaitFor(id, sessionId) : null,
+    goalWait: !blocked && !draft && goalActiveFor(id) ? await goalWaitFor(id, sessionId) : null,
     stopPending: commands.some(c => c.spec.type === 'stop' && c.spec.sessionId === sessionId && c.spec.turnId === activeTurnId),
     objective: goalObjectiveFor(id),
     loopAfterTurn: control.afterTurn,
@@ -1524,9 +1533,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         inputs: [...(await pendingBrowserInputs()).filter(input => !input.conversationId || runningToolCalls(input.conversationId) === 0),
           ...inputRows.filter(row => row.lifetime === 'temporary-planner' && ['sent', 'cancelled', 'failed'].includes(row.state))
             .map(row => ({ id: row.id, owner: row.owner, lifetime: row.lifetime, close: true,
-              retire: true,
-              replacements: inputRows.filter(next => next.createdAt > row.createdAt && next.purpose !== 'decision')
-                .map(next => ({ id: next.id, conversationId: next.conversationId })) }))],
+              retire: true }))],
         background: getConfig().ui.backgroundChats === true,
         browserOnly: getConfig().ui.browserOnly === true,
         browserWorkArea: currentBrowserWorkArea(),
@@ -1942,6 +1949,15 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       }
       const queuePending = !!astraSession && !!await goalInputPriority(id, astraSession.id, pending?.turnId ?? draft?.turnId);
       if (queuePending) draft = null;
+      const wait = !superseded && !silenceSuppressed && !queuePending && !draft && astraSession && goalActiveFor(id)
+        ? await goalWaitFor(id, astraSession.id) : null;
+      // Authority/history reads yield. Revoked or replaced work must not survive
+      // as an earlier captured ready view in the final native-send authorization.
+      const currentDraft = goalViewFor(id, goalClient);
+      if (draft && (currentDraft?.token !== draft.token || currentDraft.stage !== draft.stage || currentDraft.reply !== draft.reply)) draft = null;
+      const currentPending = goalPendingReplyFor(id);
+      if (pending && (currentPending?.replyId !== pending.replyId || currentPending.turnId !== pending.turnId ||
+          currentPending.acceptedAt !== pending.acceptedAt)) pending = null;
       return ({
       enabled: !superseded && !finishOnly && goalEnabledFor(id),
       configuredEnabled: !superseded && goalEnabledFor(id),
@@ -1956,8 +1972,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       ...goalProgressFor(goalModeFor(id), draft),
       hasKey,
       queuePending,
-      wait: !superseded && !silenceSuppressed && !queuePending && !draft && pending && astraSession && goalActiveFor(id)
-        ? goalWaitFor(id, astraSession.id) : null,
+      wait,
       // This chat's own goal, and never a worker's: the loop is off there whatever is
       // stored, and reporting one would let the page offer to drive a chat the prime owns.
       objective: superseded || goalWorkerChat(id) ? '' : goalObjectiveFor(id),
@@ -1970,7 +1985,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // script resumes this instead of manufacturing a turn from the rendered transcript.
       // A blocked chat's owed decision is withheld too, so the page cannot pick it up and
       // draft into a chat whose tools are refused.
-      pending: superseded || goalFencedChat(id) || silenceSuppressed || queuePending ? null : goalPendingReplyFor(id),
+      pending: superseded || goalFencedChat(id) || silenceSuppressed || queuePending ? null : pending,
       draft
     });
     };
@@ -2766,7 +2781,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       body = (await readBody(req)) as Record<string, unknown>;
     } catch (err) {
       if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return json(res, 400, { error: 'bad_request' }, origin);
+      return goalJson(res, 400, { error: 'bad_request' }, origin);
     }
     const id = conversationId(body['conversationId']);
     const turnId = typeof body['turnId'] === 'string' ? body['turnId'].slice(0, 200) : '';
@@ -2778,35 +2793,35 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // A reload cannot fix a rate limit, so each request pushes the reload out instead.
     if (id) noteGoalWatchActivity(id);
     const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
-    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
-    if (!turnId) return json(res, 400, { error: 'bad_turn_id' }, origin);
+    if (!id) return goalJson(res, 400, { error: 'bad_conversation_id' }, origin);
+    if (!turnId) return goalJson(res, 400, { error: 'bad_turn_id' }, origin);
     const astraSession = await findSessionByConversation(id, { requireUnique: true });
-    if (astraSession && await astraFinishOnly(astraSession.id, id)) return json(res, 409, { error: 'astra_finish_only', retryable: false }, origin);
+    if (astraSession && await astraFinishOnly(astraSession.id, id)) return goalJson(res, 409, { error: 'astra_finish_only', retryable: false }, origin);
     if (body['nativeBusy'] === true && loopAfterTurnFor(id)) {
       const deferred = await deferSilenceGoalReplyNow(id, turnId);
       if (deferred) changed();
-      return json(res, 409, { error: deferred ? 'chat_still_working' : 'goal_reply_not_pending', retryable: deferred }, origin);
+      return goalJson(res, 409, { error: deferred ? 'chat_still_working' : 'goal_reply_not_pending', retryable: deferred }, origin);
     }
     if (turnId.startsWith('g-silence-') && goalPendingReplyFor(id)?.turnId !== turnId) {
-      return json(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
+      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
     }
     if ((turnId.startsWith('g-silence-') && !await silenceContinuationAllowed(id)) || await suppressProSilence(id)) {
-      return json(res, 409, { error: 'goal_final_not_confirmed', retryable: false }, origin);
+      return goalJson(res, 409, { error: 'goal_final_not_confirmed', retryable: false }, origin);
     }
     if (await conversationWasSuperseded(id)) {
-      return json(res, 409, { error: 'conversation_superseded' }, origin);
+      return goalJson(res, 409, { error: 'conversation_superseded' }, origin);
     }
     if (
       terminalRequired &&
       goalPendingReplyFor(id)?.turnId !== turnId &&
       goalViewFor(id, clientId)?.turnId !== turnId
     ) {
-      return json(res, 409, { error: 'goal_reply_not_pending', retryable: true }, origin);
+      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: true }, origin);
     }
     // Checked here as well as in the page, because the page's copy of the setting is a poll
     // old and this is the request that spends somebody's OpenRouter credit.
-    if (!goalActiveFor(id)) return json(res, 409, { error: 'goal_disabled' }, origin);
-    if (!(await goalKeyPresent(goalModeFor(id)))) return json(res, 409, { error: 'no_api_key' }, origin);
+    if (!goalActiveFor(id)) return goalJson(res, 409, { error: 'goal_disabled' }, origin);
+    if (!(await goalKeyPresent(goalModeFor(id)))) return goalJson(res, 409, { error: 'no_api_key' }, origin);
     const live = liveConversations().find((entry) => entry.conversationId === id);
     const known = live ? null : await findSessionByConversation(id, { requireUnique: true });
     const sessionId = live?.sessionId ?? known?.id ?? null;
@@ -2819,10 +2834,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       );
     }
     if (await goalInputPriority(id, sessionId, turnId))
-      return json(res, 409, { error: 'user_input_pending', retryable: true }, origin);
+      return goalJson(res, 409, { error: 'user_input_pending', retryable: true }, origin);
     if (await chatStillWorking(id, turnId, sessionId)) {
       if (await extendedSilenceWindowFor(id, sessionId)) {
-        return json(res, 409, { error: 'chat_still_working', retryable: true }, origin);
+        return goalJson(res, 409, { error: 'chat_still_working', retryable: true }, origin);
       }
       // Owed, but not yet: the turn the page reported ended is still open here, or still
       // running tools. The
@@ -2839,7 +2854,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         });
       } catch (err) {
         logWarn(`bridge: Goal turn ${turnId} for ${id} is not durable yet — ${err instanceof Error ? err.message : String(err)}`);
-        return json(res, 503, { error: 'goal_reply_not_durable', retryable: true }, origin);
+        return goalJson(res, 503, { error: 'goal_reply_not_durable', retryable: true }, origin);
       }
       return json(
         res,
@@ -2889,18 +2904,37 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     } catch (err) {
       discardPreparedGoalDraft(id, draft.token);
       logWarn(`bridge: Goal turn ${turnId} for ${id} is not durable yet — ${err instanceof Error ? err.message : String(err)}`);
-      return json(res, 503, { error: 'goal_reply_not_durable', retryable: true }, origin);
+      return goalJson(res, 503, { error: 'goal_reply_not_durable', retryable: true }, origin);
     }
     if (await goalInputPriority(id, sessionId, turnId)) {
       discardPreparedGoalDraft(id, draft.token);
-      return json(res, 409, { error: 'user_input_pending', retryable: true }, origin);
+      return goalJson(res, 409, { error: 'user_input_pending', retryable: true }, origin);
     }
-    if (goalPendingReplyFor(id)?.turnId !== turnId || !await loopReplyHasAuthority(sessionId, id, turnId)) {
+    const pendingBeforeAuthority = goalPendingReplyFor(id);
+    if (pendingBeforeAuthority && pendingBeforeAuthority.turnId !== turnId) {
       discardPreparedGoalDraft(id, draft.token);
-      return json(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
+      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
+    }
+    const hasAuthority = await loopReplyHasAuthority(sessionId, id, turnId);
+    const pendingAfterAuthority = goalPendingReplyFor(id);
+    if (pendingAfterAuthority?.turnId !== pendingBeforeAuthority?.turnId ||
+        pendingAfterAuthority?.replyId !== pendingBeforeAuthority?.replyId ||
+        pendingAfterAuthority?.acceptedAt !== pendingBeforeAuthority?.acceptedAt) {
+      discardPreparedGoalDraft(id, draft.token);
+      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
+    }
+    // A no-MCP automatic row is deliberately handled, so absence alone must not
+    // replace its useful refusal with the generic pending-reply error.
+    if (!hasAuthority) {
+      discardPreparedGoalDraft(id, draft.token);
+      return goalJson(res, 409, { error: 'loop_mcp_call_missing', retryable: false }, origin);
+    }
+    if (pendingAfterAuthority?.turnId !== turnId) {
+      discardPreparedGoalDraft(id, draft.token);
+      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
     }
     beginGoalDraft(id, draft.token);
-    return json(res, 200, { goal: draft, sessionId }, origin);
+    return goalJson(res, 200, { goal: draft, sessionId }, origin);
   }
 
   if (route === '/goal/ack' && req.method === 'POST') {
@@ -2909,17 +2943,27 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       body = (await readBody(req)) as Record<string, unknown>;
     } catch (err) {
       if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return json(res, 400, { error: 'bad_request' }, origin);
+      return goalJson(res, 400, { error: 'bad_request' }, origin);
     }
     const id = conversationId(body['conversationId']);
-    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    if (!id) return goalJson(res, 400, { error: 'bad_conversation_id' }, origin);
     const token = typeof body['token'] === 'string' ? body['token'] : '';
     const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
     try {
-      return json(res, 200, { acknowledged: await ackGoalDraftNow(id, token, clientId) }, origin);
+      if (body['nativeBusy'] === true) {
+        const draft = goalViewFor(id, clientId);
+        if (!draft || draft.token !== token || draft.stage !== 'ready') return goalJson(res, 200, { acknowledged: false, deferred: false }, origin);
+        const session = await findSessionByConversation(id, { requireUnique: true });
+        const selection = session?.selectedModel;
+        const pro = (selection?.conversationId === id && isProModel(selection.model, selection.reasoningEffort)) || await extendedSilenceWindowFor(id);
+        const deferred = await deferSilenceGoalReplyNow(id, draft.turnId, Date.now() + (pro ? 5 * 60_000 : 2 * 60_000), { token, clientId });
+        return goalJson(res, 200, { acknowledged: false, deferred,
+          ...(deferred ? { listenUntil: goalPendingReplyFor(id)?.listenUntil } : {}) }, origin);
+      }
+      return goalJson(res, 200, { acknowledged: await ackGoalDraftNow(id, token, clientId) }, origin);
     } catch (err) {
       logWarn(`bridge: Goal acknowledgement for ${id} is not durable yet — ${err instanceof Error ? err.message : String(err)}`);
-      return json(res, 503, { error: 'goal_ack_not_durable', retryable: true }, origin);
+      return goalJson(res, 503, { error: 'goal_ack_not_durable', retryable: true }, origin);
     }
   }
 
@@ -2950,17 +2994,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       body = (await readBody(req)) as Record<string, unknown>;
     } catch (err) {
       if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return json(res, 400, { error: 'bad_request' }, origin);
+      return goalJson(res, 400, { error: 'bad_request' }, origin);
     }
     const id = conversationId(body['conversationId']);
-    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    if (!id) return goalJson(res, 400, { error: 'bad_conversation_id' }, origin);
     const text = typeof body['text'] === 'string' ? body['text'] : '';
     const named = body['mode'] === 'goal' || body['mode'] === 'loop' ? body['mode'] : null;
-    try { return json(res, 200, await saveConversationObjective(id, text, named), origin); }
+    try { return goalJson(res, 200, await saveConversationObjective(id, text, named), origin); }
     catch (error) {
       const reason = error instanceof Error ? error.message : 'goal_objective_not_durable';
       const refused = ['goal_worker_chat', 'conversation_superseded', 'chat_blocked'].includes(reason);
-      return json(res, refused ? 409 : 503, { error: reason, ...(!refused ? { retryable: true } : {}) }, origin);
+      return goalJson(res, refused ? 409 : 503, { error: reason, ...(!refused ? { retryable: true } : {}) }, origin);
     }
   }
 
@@ -2982,16 +3026,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       body = (await readBody(req)) as Record<string, unknown>;
     } catch (err) {
       if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return json(res, 400, { error: 'bad_request' }, origin);
+      return goalJson(res, 400, { error: 'bad_request' }, origin);
     }
     const text = typeof body['text'] === 'string' ? body['text'] : '';
-    if (!text.trim()) return json(res, 400, { error: 'no_objective' }, origin);
+    if (!text.trim()) return goalJson(res, 400, { error: 'no_objective' }, origin);
     const opening =
       body['mode'] === 'goal' || body['mode'] === 'loop' ? (body['mode'] as 'goal' | 'loop') : null;
-    if (!(await goalKeyPresent(opening ?? goalModeFor()))) return json(res, 409, { error: 'no_api_key' }, origin);
+    if (!(await goalKeyPresent(opening ?? goalModeFor()))) return goalJson(res, 409, { error: 'no_api_key' }, origin);
     const drafted = await draftOpeningMessage(text, opening);
-    if ('error' in drafted) return json(res, 502, drafted, origin);
-    return json(res, 200, drafted, origin);
+    if ('error' in drafted) return goalJson(res, 502, drafted, origin);
+    return goalJson(res, 200, drafted, origin);
   }
 
   /**
@@ -5206,14 +5250,18 @@ async function goalInputPriority(conversationId: string, sessionId: string, turn
 }
 
 /** Both UIs describe the same existing reply and work deadlines, without another clock owner. */
-function goalWaitFor(conversationId: string, sessionId: string, now = Date.now()): import('../shared/goal.js').GoalWait | null {
+async function goalWaitFor(conversationId: string, sessionId: string, now = Date.now()): Promise<import('../shared/goal.js').GoalWait | null> {
   const pending = goalPendingReplyFor(conversationId);
-  if (!pending) return null;
+  if (!pending) {
+    const countdowns = await sessionRecoveryCountdowns(sessionId, conversationId);
+    const visible = countdowns.find(row => row.kind === 'silence' && (row.visibleAt ?? 0) <= now && row.deadline > now);
+    return visible ? { reason: 'silence', until: visible.deadline } : null;
+  }
   if (runningToolCalls(conversationId) > 0) return { reason: 'tools' };
+  if ((pending.listenUntil ?? 0) > now) return { reason: pending.silenceSourceTurnId ? 'listening' : 'native-busy', until: pending.listenUntil };
   const grant = activeUntil.get(conversationId);
   if (grant?.sessionId === sessionId && grant.mcpBacked && !grant.thinkingFailed && grant.until > now)
     return { reason: 'quiet', until: grant.until };
-  if ((pending.listenUntil ?? 0) > now) return { reason: 'listening', until: pending.listenUntil };
   return { reason: 'settling' };
 }
 
@@ -5534,6 +5582,15 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
   const repair = repairsInFlight.get(conversationId);
   const confirmed = repair?.reason === 'silence' && repair.state === 'done' && repair.sessionId === sessionId;
   const owned = grant?.sessionId === sessionId && grant.turnId === source;
+  // A native completion without the canonical final is an immediately visible
+  // recovery wait. New accepted work advances this same grant (or reopens the
+  // turn), restoring normal hidden/timed visibility without a second flag.
+  if (owned && !grant.thinkingFailed && !confirmed && !session.activeTurnId &&
+      boundary?.kind === 'turn_end' && boundary.outcome === 'completed' && grant.evidenceAt <= boundary.time &&
+      (tabRecoveryWanted(conversationId) || loopAfterTurnFor(conversationId) || queuedAfterTurn)) {
+    result.push({ kind: 'silence', deadline: grant.until });
+    return result;
+  }
   if (owned && !grant.thinkingFailed && grant.model === 'pro' && !confirmed &&
       (tabRecoveryWanted(conversationId) || loopAfterTurnFor(conversationId) || queuedAfterTurn)) {
     result.push({ kind: 'silence', deadline: grant.until, visibleAt: grant.evidenceAt + PRO_SILENCE_MS / 2 });
@@ -5867,14 +5924,30 @@ async function noteRecoveryObservations(
   const mcpTerminal = !thinkingFailed && !terminalGrant?.thinkingFailed && terminalGrant?.turnId && activity.endedTurnId === terminalGrant.turnId && sessionId && activity.terminal &&
     lastEnd !== 'stopped' && await turnHasMcpCall(sessionId, conversationId, terminalGrant.turnId);
   const finalTurn = activity.endedTurnId ?? terminalGrant?.turnId;
-  const completedFinal = activity.terminal && sessionId && finalTurn &&
+  // A replacement page can first reveal the exact final after a completed end
+  // control. That history backfill is not fresh activity, but its canonical
+  // final still consumes the current work grant immediately.
+  const observedFinal = observations.some(item => item.kind === 'assistant_message' &&
+    (item.state === 'final' || item.final === true));
+  const completedFinal = (activity.terminal || observedFinal) && sessionId && finalTurn &&
     await recordedFinalForTurn(sessionId, finalTurn);
   // The ten-/two-minute budget is silence recovery only. Final response evidence
   // consumes it even if a local call is still draining; runningToolCalls separately
   // guards actual send/compaction. Replayed finals cannot consume newer work.
   if (completedFinal && terminalGrant && activeUntil.get(conversationId) === terminalGrant &&
       terminalGrant.turnId === finalTurn) endActivity(conversationId);
-  else if (mcpTerminal && terminalGrant && activeUntil.get(conversationId) === terminalGrant) terminalGrant.mcpBacked = true;
+  else if (mcpTerminal && terminalGrant && activeUntil.get(conversationId) === terminalGrant) {
+    terminalGrant.mcpBacked = true;
+    // A completed tool-only response can still acquire its missing final text.
+    // Give that accepted completion the ordinary two-minute recovery window;
+    // historical replay and the replacement page cannot renew a spent reload.
+    if (lastEnd === 'completed' && terminalGrant.model === 'other' && ended &&
+        !(repaired?.reason === 'silence' && repaired.state === 'done')) {
+      terminalGrant.evidenceAt = Math.max(terminalGrant.evidenceAt, Math.min(Date.now(), ended.time));
+      terminalGrant.until = terminalGrant.evidenceAt + CHAT_SILENCE_MS;
+      armSilenceSweep();
+    }
+  }
   if (!completedFinal && !thinkingFailed && !mcpTerminal && !awaitingSilenceRefresh && (proTerminal || (activity.terminal && terminalGrant?.model !== 'pro'))) {
     if (proTerminal) endActivity(conversationId);
     else if (lastEnd === 'unknown' && sessionId && await extendedSilenceWindowFor(conversationId, sessionId)) {

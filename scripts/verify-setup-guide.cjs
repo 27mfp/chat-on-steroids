@@ -11,6 +11,19 @@ app.whenReady().then(async () => {
   const root = path.resolve(__dirname, '..');
   const output = path.join(root, 'outputs/setup-guide');
   fs.mkdirSync(output, { recursive: true });
+  // Pixel data and transparency are sufficient for these PNGs; reject embedded metadata.
+  for (const name of fs.readdirSync(path.join(root, 'src/renderer/setup-images'))) {
+    if (!name.endsWith('.png')) continue;
+    const bytes = fs.readFileSync(path.join(root, 'src/renderer/setup-images', name));
+    let offset = 8;
+    while (offset < bytes.length) {
+      const type = bytes.toString('ascii', offset + 4, offset + 8);
+      assert.ok(['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS'].includes(type), `${name}: unexpected metadata ${type}`);
+      offset += bytes.readUInt32BE(offset) + 12;
+      if (type === 'IEND') break;
+    }
+    assert.equal(offset, bytes.length, `${name}: trailing data`);
+  }
   const server = await createServer({ configFile: false, root: path.join(root, 'src/renderer'),
     server: { host: '127.0.0.1', port: 0 }, plugins: [{ name: 'setup-fixture', configureServer(vite) {
       vite.middlewares.use('/setup-preview.html', async (_request, response) => {
@@ -18,8 +31,8 @@ app.whenReady().then(async () => {
           .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
           .replace('</body>', `<script type="module">
             import { initSetupGuide } from '/setup-guide.ts';
-            import { initLanguage, setLanguage } from '/i18n.ts';
-            initLanguage(); initSetupGuide(); window.setLanguage = setLanguage;
+            import { initLanguage, setLanguage, t } from '/i18n.ts';
+            initLanguage(); initSetupGuide(); window.setLanguage = setLanguage; window.t = t;
             document.querySelector('.app').dataset.screen = 'settings';
             for (const p of document.querySelectorAll('.panel')) p.classList.toggle('is-active', p.dataset.panel === 'setup');
             document.getElementById('tabs').hidden = false;
@@ -39,35 +52,52 @@ app.whenReady().then(async () => {
     const ready = await win.webContents.executeJavaScript('window.fixtureReady');
     assert.equal(ready, true);
     const results = [];
-    for (const [width, height, zoom, language] of [[1100, 900, 1, 'en'], [800, 650, 1, 'en'], [1100, 900, 1.5, 'zh-CN']]) {
+    for (const [width, height, zoom, language, theme] of [[1100, 900, 1, 'en', 'dark'], [800, 650, 1, 'en', 'dark'], [1100, 900, 1.5, 'zh-CN', 'light'], [640, 720, 1, 'zh-CN', 'dark']]) {
       win.setSize(width, height);
       win.webContents.setZoomFactor(zoom);
       await win.webContents.executeJavaScript(`window.setLanguage('${language}')`);
-      for (const [group, count] of [['tunnel', 2], ['key', 1], ['developer', 2], ['plugin', 2]]) {
+      await win.webContents.executeJavaScript(`document.documentElement.dataset.theme = '${theme}'`);
+      const emptyFields = await win.webContents.executeJavaScript(`(() => {
+        return [...document.querySelectorAll('.setup-required')].every(input => {
+          const empty = getComputedStyle(input).backgroundColor;
+          input.classList.remove('is-empty');
+          const filled = getComputedStyle(input).backgroundColor;
+          input.classList.add('is-empty');
+          return empty !== filled;
+        });
+      })()`);
+      assert.equal(emptyFields, true, 'Empty required fields must have a distinct tint');
+      for (const [group, count] of [['tunnel', 1], ['key', 1], ['developer', 1], ['plugin', 2]]) {
         for (let index = 0; index < count; index++) {
           const selector = `[data-setup-guide="${group}"]`;
           const measured = await win.webContents.executeJavaScript(`(async () => {
             const host = document.querySelector('${selector}');
-            const buttons = host.querySelectorAll('button');
-            if (${index} === 0 && ${count} > 1) buttons[0].click();
-            else if (${index} > 0) buttons[1].click();
-            const img = host.querySelector('img'); await img.decode();
-            host.scrollIntoView({block:'center'});
+            const figures = host.querySelectorAll('.setup-figure');
+            await Promise.all([...host.querySelectorAll('img')].map(img => img.decode()));
+            const figure = figures[${index}];
+            const img = figure.querySelector('img');
+            (${count} > 1 && host.offsetHeight < innerHeight ? host : figure).scrollIntoView({block:'center'});
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-            const panel = host.closest('.panel'); const frame = host.querySelector('.setup-shot').getBoundingClientRect();
+            const panel = host.closest('.panel'); const frame = figure.querySelector('.setup-shot').getBoundingClientRect();
             return { imageLoaded: img.naturalWidth > 0, overflow: panel.scrollWidth > panel.clientWidth,
-              labelsFit: [...host.querySelectorAll('.setup-callout')].every(n => {
-                const r=n.getBoundingClientRect(); return r.left >= frame.left - 1 && r.right <= frame.right + 1 && r.bottom <= frame.bottom + 1;
-              }) };
+              imagesVisible: figures.length === ${count} && [...figures].every(n => n.getBoundingClientRect().height > 0),
+              captionTranslated: host.querySelector('figcaption p').textContent === window.t(${JSON.stringify('Select the workspace you use in ChatGPT, then create the tunnel and copy its ID.')}) || '${group}' !== 'tunnel',
+              labelsFit: [...figure.querySelectorAll('.setup-callout, .setup-target')].every(n => {
+                const r=n.getBoundingClientRect(); return r.left >= frame.left - 1 && r.right <= frame.right + 1 && r.top >= frame.top - 1 && r.bottom <= frame.bottom + 1;
+              }),
+              pairLayout: ${count} === 1 || (host.clientWidth > 510
+                ? Math.abs(figures[0].getBoundingClientRect().top - figures[1].getBoundingClientRect().top) < 1
+                : figures[1].getBoundingClientRect().top > figures[0].getBoundingClientRect().bottom)
+            };
           })()`);
-          assert.deepEqual(measured, { imageLoaded: true, overflow: false, labelsFit: true }, JSON.stringify({ group, index, width, zoom, measured }));
-          results.push({ group, index, width, zoom, language, ...measured });
+          assert.deepEqual(measured, { imageLoaded: true, overflow: false, imagesVisible: true, captionTranslated: true, labelsFit: true, pairLayout: true }, JSON.stringify({ group, index, width, zoom, measured }));
+          results.push({ group, index, width, zoom, language, theme, ...measured });
           // Image decoding/layout can finish before the offscreen compositor publishes its tile.
           await new Promise(resolve => setTimeout(resolve, 100));
           fs.writeFileSync(path.join(output, `${language}-${width}-${zoom}-${group}-${index}.png`), (await win.webContents.capturePage()).toPNG());
           if (width === 1100 && zoom === 1) {
             const rect = await win.webContents.executeJavaScript(`(() => {
-              const r=document.querySelector('${selector} .setup-shot').getBoundingClientRect();
+              const r=document.querySelectorAll('${selector} .setup-shot')[${index}].getBoundingClientRect();
               return r.top >= 0 && r.bottom <= innerHeight ? { x:Math.round(r.x), y:Math.round(r.y), width:Math.round(r.width), height:Math.round(r.height) } : null;
             })()`);
             if (rect) fs.writeFileSync(path.join(output, `overlay-${group}-${index}.png`), (await win.webContents.capturePage(rect)).toPNG());
@@ -77,7 +107,7 @@ app.whenReady().then(async () => {
     }
     // Native modal, Escape dismissal and focus restoration must work without opening a browser.
     await win.webContents.executeJavaScript(`(() => {
-      const button=document.querySelector('[data-setup-guide="plugin"] .setup-guide-controls button:last-child');
+      const button=document.querySelectorAll('[data-setup-guide="plugin"] .setup-enlarge')[1];
       button.focus(); button.click();
     })()`);
     assert.equal(await win.webContents.executeJavaScript('document.querySelector(".setup-image-dialog").open'), true);

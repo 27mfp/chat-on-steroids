@@ -5,7 +5,9 @@ import { safeExternalLink } from '../shared/external-link.js';
 import { createAgentPanel } from './agent-panel.js';
 import { renderAgentPlan } from './agent-plan.js';
 import { userPromptText } from '../shared/user-prompt.js';
+import { goalErrorMessage } from '../shared/goal-errors.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
+import { createSidebarOrder } from './sidebar-order.js';
 import { toolResultText } from './tool-result.js';
 import { chatErrorPresentation } from './chat-error.js';
 import { renderRecoveryCountdowns } from './recovery.js';
@@ -130,6 +132,8 @@ function projectGroup(id: string | null | undefined): string | null {
   return id && !projects.find(project => project.id === id)?.ungrouped ? id : null;
 }
 const PROJECT_TASK_PAGE_SIZE = 5;
+const PROJECT_TASK_PAGE_INCREMENT = 8;
+let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
 function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
 let selectionGeneration = 0;
 let pendingNewInput: { id: string; generation: number } | null = null;
@@ -551,6 +555,8 @@ function maybePageSessions(): void {
 let diagnosticsExpanded = false;
 
 function paintSessions(): void {
+  // Keep the pointer's elected rows alive while asynchronous activity snapshots arrive.
+  if (sidebarOrder?.interacting) return;
   document.getElementById('sessionTooltip')?.remove();
   const list = $('sessionList');
   const children = new Map<string, SessionSummary[]>();
@@ -575,12 +581,17 @@ function paintSessions(): void {
     if (parentRow) { parentRow.append(button); parentRow.title += ` · ${button.title}`; } else target.push(button);
     if (expandedWorkers.has(key)) { const box = el('div', 'worker-group'); box.append(...workers.map(sessionRow)); target.push(box); }
   };
-  for (const entry of sessions) {
+  const orderedSessions = sidebarOrder
+    ? [...new Set(sessions.map(entry => projectGroup(entry.projectId) ?? ''))].flatMap(scope =>
+      sidebarOrder!.ordered(scope, sessions.filter(entry => (projectGroup(entry.projectId) ?? '') === scope)))
+    : sessions;
+  for (const entry of orderedSessions) {
     if (entry.origin?.kind === 'worker') continue;
     if (!entry.conversationId) { diagnostics.push(entry); continue; }
     const projectId = projectGroup(entry.projectId);
     const target: HTMLElement[] = projectId ? [] : rows;
     const row = sessionRow(entry); target.push(row);
+    row.dataset.sortScope = projectId ?? ''; row.tabIndex = 0;
     const workers = children.get(entry.id); if (workers) group(entry.id, workers, row, target);
     if (projectId) {
       const tasks = projectRows.get(projectId) ?? [];
@@ -609,7 +620,7 @@ function paintSessions(): void {
     heading.append(icon('i-folder'), label); section.append(heading);
     section.addEventListener('toggle', () => { if (section.isConnected) section.open ? collapsedProjects.delete(id) : collapsedProjects.add(id); });
     if (project) {
-      const create = el('button', 'btn project-new'); create.append(icon('i-plus')); create.setAttribute('type', 'button'); create.dataset.newProject = id;
+      const create = el('button', 'btn project-new'); create.append(icon('i-pencil')); create.setAttribute('type', 'button'); create.dataset.newProject = id;
       ui(create, 'title', () => t("New chat in this project")); create.setAttribute('aria-label', create.title);
       create.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); selectNewChat(id); }); heading.append(create);
       const remove = el('button', 'btn project-remove') as HTMLButtonElement;
@@ -653,7 +664,7 @@ function paintSessions(): void {
     if (shown.length < tasks.length) {
       const more = el('button', 'btn project-show-more', () => t("Show more")) as HTMLButtonElement;
       more.type = 'button'; ui(more, 'aria-label', () => t("Show more tasks in {0}", [project?.name ?? t("this project")]));
-      more.addEventListener('click', () => { projectVisibleCounts.set(id, count + PROJECT_TASK_PAGE_SIZE); paintSessions(); });
+      more.addEventListener('click', () => { projectVisibleCounts.set(id, count + PROJECT_TASK_PAGE_INCREMENT); paintSessions(); });
       section.append(more);
     }
     projectSections.push(section);
@@ -770,13 +781,13 @@ function paintGoalProgress(): void {
   if (phase === 'retrying') { text = ''; error = undefined; }
   labels.retrying = t("Provider busy · retry {0}{1}", [progress?.attempt ?? '', progress?.retryAt ? ' at ' + new Date(progress.retryAt).toLocaleTimeString() : '']);
   const mode = $<HTMLSelectElement>('chatAutomation').value === 'loop' ? t('Loop') : t('Goal');
-  labels.settling = `${mode} · ${wait?.reason === 'quiet' ? t('Waiting for tool inactivity') :
+  labels.settling = `${mode} · ${wait?.reason === 'native-busy' ? t('ChatGPT resumed work · waiting before retry') : wait?.reason === 'silence' ? t('Waiting before recovery reload') : wait?.reason === 'quiet' ? t('Waiting for tool inactivity') :
     wait?.reason === 'tools' ? t('Waiting for running tools') : wait?.reason === 'listening' ? t('Waiting for activity after recovery') : t('Answer settling')}`;
   row.hidden = !phase; if (!phase) return;
   const busy = ['settling', 'saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
   row.setAttribute('aria-busy', String(busy));
   const marker = el('span', busy ? 'session-status is-working' : 'session-status');
-  const body = el('div', 'queue-label'); body.append(el('span', '', error ? `${labels.failed}: ${error}` : labels[phase] ?? phase));
+  const body = el('div', 'queue-label'); body.append(el('span', '', error ? `${labels.failed}: ${goalErrorMessage(error)}` : labels[phase] ?? phase));
   if (text && ['generating', 'answering', 'preparing'].includes(phase)) { const preview = el('pre', 'goal-live-preview', text.slice(-8000)); body.append(preview); }
   row.replaceChildren(marker, body);
   if (phase === 'settling' && wait?.until) {
@@ -881,14 +892,14 @@ function paintTaskPlan(): void {
   if (plan?.stages) paintPreparedPlan();
   else if (plan?.error) {
     const failure = plan.error;
-    const error = el('div', 'muted', () => failure === 'invalid_goal_decision_json' ? t("The planner response could not be read.") : failure);
+    const error = el('div', 'muted', () => failure === 'invalid_goal_decision_json' ? t("The planner response could not be read.") : goalErrorMessage(failure));
     error.title = plan.error;
     preview.append(error, el('div', 'muted', () => t("Send again to retry, or cancel the plan.")));
   } else if (plan?.requestId) {
     const progress = plan.progress;
     const label = () => !progress ? t("Creating plan…") : progress.phase === 'retrying' ? t("Provider busy · retry {0}{1}", [progress.attempt ?? '', progress.retryAt ? t(' at {0}', [new Date(progress.retryAt).toLocaleTimeString()]) : '']) : progress.phase === 'cancelled' ? t("Plan cancelled") : progress.phase === 'preparing' ? t("Preparing plan…") : progress.phase === 'ready' ? t("Plan ready") : progress.phase === 'failed' ? t("Plan failed") : t("Writing plan…");
     preview.append(el('span', 'muted', label));
-    if (progress?.text || progress?.error) preview.append(el('pre', 'task-progress-text', progress.error || progress.text));
+    if (progress?.text || progress?.error) preview.append(el('pre', 'task-progress-text', progress.error ? goalErrorMessage(progress.error) : progress.text));
   }
   paintTaskActions(); paintDeliveryControls();
 }
@@ -915,6 +926,10 @@ async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
     if (result.ok) {
       plan.stages = result.data;
       plan.requestId = null;
+      // The accepted result now owns the captured request. Retire only its
+      // unchanged source draft, before queue admission can yield to new typing.
+      inputDrafts.delete(key);
+      if (draftKey() === key) input.value = '';
       if (sessionId) await queuePreparedPlan(key, plan as TaskPlanDraft & { stages: string[] }, sessionId, projectId);
     }
     else plan.error = result.error;
@@ -987,8 +1002,8 @@ async function queuePreparedPlan(key: string, plan: TaskPlanDraft & { stages: st
     const result = await run(api.sendInput({ id: crypto.randomUUID(), sessionId, projectId,
       text: stages[0]!, stages: stages.slice(1), mode: 'finish', dueAt: Date.now(), model: null, reasoningEffort: null }));
     if (result) {
-      // Queue admission never consumes the composer or its attachments. The durable
-      // owner remains visible through the same queue read used for manual follow-ups.
+      // The result already retired its source prompt. Admission leaves any newer
+      // composer draft and attachments alone; the durable queue owns the stages.
       if (taskPlans.get(key) === plan) cancelTaskPlan(key);
       await refreshInputQueue();
     }
@@ -2589,8 +2604,8 @@ export function chatSettingsPatch(current: Config): {
       loopPrompt:
         $<HTMLTextAreaElement>('goalLoopPrompt').value.trim() || DEFAULT_GOAL_LOOP_SYSTEM_PROMPT
     },
-    // Empty is a real choice here, not a value to repair: it means "add nothing of mine".
-    mcp: { instructions: $<HTMLTextAreaElement>('mcpInstructions').value.trim() }
+    // The retired editor no longer owns this stored configuration.
+    mcp: current.mcp ?? { instructions: '' }
   };
 }
 
@@ -2722,7 +2737,6 @@ function applyGoal(state: AppState, previous?: Config): void {
   if (config.goal.provider?.kind !== 'custom') goalModel = config.goal.model;
   applyChatValue($<HTMLSelectElement>('goalReasoning'), config.goal.reasoning, previous?.goal.reasoning);
   applyChatValue($<HTMLTextAreaElement>('goalPrompt'), config.goal.prompt, previous?.goal.prompt);
-  applyChatValue($<HTMLTextAreaElement>('mcpInstructions'), config.mcp?.instructions ?? '', previous?.mcp?.instructions);
   applyChatValue(
     $<HTMLTextAreaElement>('goalObjectivePrompt'),
     config.goal.objectivePrompt,
@@ -2911,8 +2925,7 @@ const CHAT_INPUTS = [
   'goalReasoning',
   'goalPrompt',
   'goalObjectivePrompt',
-  'goalLoopPrompt',
-  'mcpInstructions'
+  'goalLoopPrompt'
 ];
 
 /** Writes app state into this panel's controls. Called from the renderer's apply(). */
@@ -3436,6 +3449,9 @@ function selectNewChat(projectId: string | null = null): void {
 }
 
 export function initChat(next: Deps): void {
+  sidebarOrder = createSidebarOrder($('sessionList'), () => sessions
+    .filter(entry => entry.conversationId && entry.origin?.kind !== 'worker')
+    .map(entry => ({ id: entry.id, scope: projectGroup(entry.projectId) ?? '' })), paintSessions);
   deps = next;
   const agentToggle = el('button', 'btn btn-icon', '◫') as HTMLButtonElement;
   agentToggle.id = 'agentPanelToggle'; agentToggle.type = 'button'; agentToggle.hidden = true;
@@ -3669,7 +3685,7 @@ export function initChat(next: Deps): void {
     paintDeliveryControls(); paintTaskActions();
   });
   $('chatInput').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if ($<HTMLTextAreaElement>('chatInput').value.trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || $<HTMLTextAreaElement>('chatInput').value.trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
   });
   $('composerSettings').addEventListener('toggle', paintTaskActions);
   initContextMeter();

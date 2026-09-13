@@ -546,6 +546,21 @@ it('pages project tasks as complete parent/worker groups and keeps the selected 
   await append([]);
   expect(section().querySelectorAll(':scope > .sess')).toHaveLength(8);
 });
+it('shows five project chats initially and reveals eight more per click', async () => {
+  const project = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'Paged', path: '/paged', createdAt: 1 };
+  const tasks = Array.from({ length: 22 }, (_, index) => ({ ...summary([]), id: `page-task-${index}`, conversationId: `chat-${index}`, projectId: project.id }));
+  const { w, append } = await boot([], false, [], [project], { sessions: tasks });
+  const section = () => w.document.querySelector('.project-group')!;
+  expect(section().querySelectorAll(':scope > .sess')).toHaveLength(5);
+  for (const count of [13, 21, 22]) {
+    (section().querySelector('.project-show-more') as HTMLButtonElement).click();
+    expect(section().querySelectorAll(':scope > .sess')).toHaveLength(count);
+  }
+  expect(section().querySelector('.project-show-more')).toBeNull();
+  await append([]);
+  expect(section().querySelectorAll(':scope > .sess')).toHaveLength(22);
+});
+
 it('shows original user text while retaining transport instructions outside the visible bubble', async () => {
   const { w } = await boot([{ seq: 1, time: T0, source: 'app', kind: 'user_message', messageId: 'native-one', inputId: 'one', authoredText: 'hello', message: text('hello\n\nTransport-only control instruction') }]);
   expect(w.document.querySelector('.said.is-user .msg')?.textContent).toBe('hello');
@@ -1326,7 +1341,7 @@ it.each([true, false])('hands plan presentation to queued stages while sending a
   await settle();
   expect(preview.hidden).toBe(accepted);
   expect(preview.querySelectorAll('.plan-stage')).toHaveLength(accepted ? 0 : 6);
-  if (!accepted) expect(input.value).toBe('Build the whole task');
+  if (!accepted) expect(input.value).toBe('');
 });
 
 it.each(['delivery', 'model', 'refresh-failed', 'enqueue-failed'])('retries the durable full plan without pasting stage one (%s)', async failure => {
@@ -1535,7 +1550,7 @@ it('queues every generated stage in an existing session without Send and preserv
   w.document.getElementById('createPlan')!.click(); await settle();
   expect(live.sent).toHaveLength(1);
   expect(live.sent[0]).toMatchObject({ sessionId: summary([]).id, text: 'Build foundation', stages: ['Verify it'], mode: 'finish', model: null, reasoningEffort: null });
-  expect(input.value).toBe('Build the whole task');
+  expect(input.value).toBe('');
   input.value = ''; input.dispatchEvent(new w.Event('input'));
   expect(w.document.querySelectorAll('#finishQueue .queued-input')).toHaveLength(2);
   expect(w.document.querySelectorAll('[aria-label="Remove queued task"]')).toHaveLength(2);
@@ -1580,16 +1595,37 @@ it('retains a rejected queue admission independently of composer edits and retri
   expect(input.value).toBe('');
 });
 
-it('sends a retained new-chat plan with its captured request after the composer is cleared', async () => {
-  const { w, live } = await boot([], false);
+it.each([false, true])('clears the planner prompt and starts a new-chat plan with Enter from the empty composer (pro=%s)', async pro => {
+  const { w, live } = await boot([], false, [], [], { pro });
+  const effort = w.document.getElementById('composerReasoning') as HTMLSelectElement;
+  effort.value = pro ? 'pro' : 'high'; effort.dispatchEvent(new w.Event('change')); await settle();
   (w as any).api.draftTaskPlan = vi.fn(async () => ({ ok: true, data: ['Build foundation', 'Verify it'] }));
   const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
   input.value = 'Original objective';
   w.document.getElementById('createPlan')!.click(); await settle();
-  input.value = ''; input.dispatchEvent(new w.Event('input'));
-  w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { cancelable: true })); await settle();
+  expect(input.value).toBe('');
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }));
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', isComposing: true, cancelable: true }));
+  await settle(); expect(live.sent).toHaveLength(0);
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', cancelable: true })); await settle();
   expect(live.sent).toHaveLength(1);
-  expect(live.sent[0]).toMatchObject({ objective: 'Original objective', text: 'Build foundation', stages: ['Verify it'] });
+  expect(live.sent[0]).toMatchObject({ objective: 'Original objective', text: 'Build foundation', stages: ['Verify it'], reasoningEffort: pro ? 'pro' : 'high' });
+});
+
+it('does not erase a new composer draft while completed-plan queue admission is pending', async () => {
+  const { w } = await boot([]);
+  const api = (w as any).api, send = api.sendInput;
+  let admit!: () => Promise<void>;
+  api.sendInput = vi.fn((args: InputArgs) => new Promise(resolve => { admit = async () => resolve(await send(args)); }));
+  api.draftTaskPlan = vi.fn(async () => ({ ok: true, data: ['First checkpoint', 'Last checkpoint'] }));
+  const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
+  input.value = 'Planner request';
+  w.document.getElementById('createPlan')!.click(); await settle();
+  expect(input.value).toBe('');
+  input.value = 'My next correction'; input.dispatchEvent(new w.Event('input'));
+  await admit(); await settle();
+  expect(input.value).toBe('My next correction');
+  expect(w.document.querySelectorAll('#finishQueue .queued-input')).toHaveLength(2);
 });
 
 it('clearing the complete planner task cancels generation and restores Create plan', async () => {
@@ -1937,6 +1973,7 @@ it('retains an existing running chat planner across navigation and accepts its r
   expect(w.document.querySelectorAll('.plan-stage')).toHaveLength(0);
   (w.document.querySelector('#sessionList [data-id]') as HTMLElement).click(); await settle();
   expect(w.document.querySelectorAll('#finishQueue .queued-input')).toHaveLength(2);
+  expect(input.value).toBe('');
   expect(w.document.getElementById('taskPlanPreview')!.hidden).toBe(true);
   expect(live.sent).toHaveLength(1);
   expect(live.sent[0]).toMatchObject({ sessionId: summary([]).id, mode: 'finish', text: 'Original first stage', stages: ['Original checkpoint'] });
@@ -1991,9 +2028,26 @@ it('renders existing-chat Goal draft stages from main controls without starting 
   draft = { ...draft, stage: 'ready' }; await append([]);
   expect(row.textContent).toContain('awaiting ChatGPT delivery');
   draft = { ...draft, stage: 'failed', error: 'no_api_key' }; await append([]);
-  expect(row.textContent).toContain('no_api_key');
+  expect(row.textContent).toContain('No API key is configured for the continuation provider.');
+  expect(row.textContent).not.toContain('no_api_key');
   expect(row.getAttribute('aria-busy')).toBe('false');
   expect(opening).not.toHaveBeenCalled();
+});
+
+it('shows the immediate recovery deadline before a draft exists and clears it on fresh work', async () => {
+  const { w, append } = await boot([]);
+  const api = (w as any).api, original = api.getSessionControls;
+  let goalWait: object | null = { reason: 'silence', until: Date.now() + 120_000 };
+  api.getSessionControls = async (id: string) => ({ ok: true, data: { ...(await original(id)).data,
+    automation: 'loop', goalWait, goalDraft: null } });
+  await append([]);
+  const row = w.document.getElementById('goalLifecycle')!;
+  expect(row.hidden).toBe(false);
+  expect(row.textContent).toContain('Loop · Waiting before recovery reload');
+  expect(row.querySelector('[role="timer"]')).not.toBeNull();
+  goalWait = null;
+  await append([]);
+  expect(row.hidden).toBe(true);
 });
 
 it('reuses the Goal animation for a session-finish draft while ordinary automation is off', async () => {
@@ -2159,8 +2213,15 @@ it('scrolls forward through evicted history with wheel, keyboard and scrollbar, 
   const pane = w.document.getElementById('chatBody')!;
   Object.defineProperties(pane, { clientHeight: { configurable: true, value: 400 },
     scrollHeight: { configurable: true, get: () => timeline.querySelectorAll('[data-timeline-key]').length * 20 } });
+  // Model one layout snapshot per DOM revision. A selector scan inside every
+  // rectangle read made this mock quadratic and exhausted Windows CI's timeout.
+  let geometryRows: Map<Element, number> | null = null;
+  const geometryChanges = new w.MutationObserver(() => { geometryRows = null; });
+  geometryChanges.observe(timeline, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-timeline-key'] });
   w.HTMLElement.prototype.getBoundingClientRect = function () {
-    const index = [...timeline.querySelectorAll('[data-timeline-key]')].indexOf(this);
+    if (geometryChanges.takeRecords().length) geometryRows = null;
+    geometryRows ??= new Map([...timeline.querySelectorAll('[data-timeline-key]')].map((row, index) => [row, index]));
+    const index = geometryRows.get(this) ?? -1;
     const top = index < 0 ? 0 : index * 20 - pane.scrollTop;
     return { top, bottom: top + 20, height: 20 } as DOMRect;
   };
@@ -2198,6 +2259,7 @@ it('scrolls forward through evicted history with wheel, keyboard and scrollbar, 
   await downward('wheel'); // Empty forward page proves we reached the current tail.
   await append([{ seq: 401, time: T0 + 401, source: 'extension', kind: 'user_message', messageId: 'live-again', message: text('Live again') }]);
   expect(timeline.textContent).toContain('Live again');
+  geometryChanges.disconnect();
 });
 
 it('keeps admitting newer data when dense collapsed activity reaches the resident bound', async () => {
