@@ -1,0 +1,26 @@
+name: Picker hotfix source snapshot
+
+on:
+  push:
+    branches: [fix/model-picker-2.1.12]
+    paths: [.github/workflows/picker-hotfix-source.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: git archive --format=tar.gz --output=picker-hotfix-source.tar.gz HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: picker-hotfix-source
+          path: picker-hotfix-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
