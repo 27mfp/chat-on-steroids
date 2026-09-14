@@ -1,0 +1,166 @@
+name: Prepare picker hotfix 2.1.12
+
+# One-time, branch-scoped preparation. The release commit is made in a separate
+# worktree rooted at the reviewed main commit, so neither this workflow nor its
+# encoded transport patch enters main or the release tag.
+on:
+  push:
+    branches: [fix/model-picker-2.1.12]
+    paths: [.github/workflows/prepare-picker-hotfix-2.1.12.yml]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: prepare-picker-hotfix-2.1.12
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'totec448-spec/chat-on-steroids'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE: bd78cf21b5d923066e8b91f23add2548e4fe8035
+      TAG: v2.1.12
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify the reviewed base and transport, then create an isolated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE"
+          test -z "$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          base64 --decode scripts/picker-hotfix-2.1.12.patch.gz.b64 | gzip --decompress > "$RUNNER_TEMP/picker-2.1.12.patch"
+          echo "f7aa39a201848899f7fd5c44210f6ac60a53851d1c2e9cc1505a3b990974ba2e  $RUNNER_TEMP/picker-2.1.12.patch" | sha256sum -c -
+          git worktree add --detach "$RUNNER_TEMP/picker-candidate" "$BASE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Install dependencies
+        working-directory: ${{ runner.temp }}/picker-candidate
+        run: npm ci
+
+      - name: Prove the new regressions fail against the old implementation
+        working-directory: ${{ runner.temp }}/picker-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --include=test/model-picker-state.test.ts "$RUNNER_TEMP/picker-2.1.12.patch"
+          set +e
+          npx vitest run test/model-picker-state.test.ts -t '^hotfix:' --reporter=json --outputFile="$RUNNER_TEMP/picker-baseline.json" > "$RUNNER_TEMP/picker-baseline.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/picker-baseline.log"
+          test "$status" -ne 0
+          node <<'NODE'
+          const fs = require('node:fs');
+          const result = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/picker-baseline.json`, 'utf8'));
+          const failed = result.testResults.flatMap(file => file.assertionResults || []).filter(test => test.status === 'failed');
+          if (!failed.some(test => test.fullName.includes('hotfix: discovers and selects a native version with a retirement caption'))) {
+            throw new Error('The expected caption regression did not reproduce as an assertion failure');
+          }
+          if (!(result.numFailedTests > 0)) throw new Error('No baseline regression reproduced');
+          console.log(`Baseline reproduced ${result.numFailedTests} failing regression cases`);
+          console.log(failed.map(test => test.fullName).join('\n'));
+          NODE
+          git apply --reverse --include=test/model-picker-state.test.ts "$RUNNER_TEMP/picker-2.1.12.patch"
+          git diff --exit-code
+
+      - name: Apply the reviewed patch and stage only release changes
+        working-directory: ${{ runner.temp }}/picker-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check "$RUNNER_TEMP/picker-2.1.12.patch"
+          git apply "$RUNNER_TEMP/picker-2.1.12.patch"
+          node --check extension/fiber.js
+          node --check extension/chatgpt-dom.js
+          git diff --check
+          git add AGENTS.md CHANGELOG.md docs/model-picker-hotfix-2.1.12.md docs/release-notes/v2.1.12.md extension/chatgpt-dom.js extension/fiber.js extension/manifest.json package-lock.json package.json src/main/version.ts test/model-picker-state.test.ts
+          git diff --cached --check
+          git diff --cached --stat
+
+      - name: Require all old and new picker tests to pass
+        working-directory: ${{ runner.temp }}/picker-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx vitest run test/model-picker-state.test.ts --reporter=json --outputFile="$RUNNER_TEMP/picker-fixed.json" > "$RUNNER_TEMP/picker-fixed.log" 2>&1
+          cat "$RUNNER_TEMP/picker-fixed.log"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const result = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/picker-fixed.json`, 'utf8'));
+          if (!result.success || result.numFailedTests || result.numPassedTests < 40) throw new Error('Picker verification was incomplete');
+          console.log(`Picker verification: ${result.numPassedTests} passed, ${result.numFailedTests} failed`);
+          NODE
+
+      - name: Full repository verification
+        working-directory: ${{ runner.temp }}/picker-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run verify:ci 2>&1 | tee "$RUNNER_TEMP/picker-full-verify.log"
+
+      - name: Build the app
+        working-directory: ${{ runner.temp }}/picker-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee "$RUNNER_TEMP/picker-build.log"
+          git diff --exit-code
+
+      - name: Publish a clean commit and new tag without overwriting concurrent work
+        working-directory: ${{ runner.temp }}/picker-candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const cp = require('node:child_process');
+          const fs = require('node:fs');
+          const expected = ['AGENTS.md', 'CHANGELOG.md', 'docs/model-picker-hotfix-2.1.12.md', 'docs/release-notes/v2.1.12.md', 'extension/chatgpt-dom.js', 'extension/fiber.js', 'extension/manifest.json', 'package-lock.json', 'package.json', 'src/main/version.ts', 'test/model-picker-state.test.ts'].sort();
+          const actual = cp.execFileSync('git', ['diff', '--cached', '--name-only'], { encoding: 'utf8' }).trim().split('\n').sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('Unexpected release paths');
+          const pkg = require('./package.json'), lock = require('./package-lock.json'), manifest = require('./extension/manifest.json');
+          const source = fs.readFileSync('src/main/version.ts', 'utf8');
+          const app = source.match(/APP_VERSION = '([^']+)'/)?.[1];
+          if ([pkg.version, lock.version, lock.packages[''].version, manifest.version, app].some(version => version !== '2.1.12')) throw new Error('Release versions disagree');
+          NODE
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE"
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test -z "$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          node scripts/check-release-absent.mjs
+          git commit -m 'fix: support the updated ChatGPT model picker in 2.1.12'
+          node scripts/verify-public-history.mjs
+          git push --atomic origin HEAD:refs/heads/main "HEAD:refs/tags/$TAG"
+          printf 'Release commit: %s\nRelease tag: %s\n' "$(git rev-parse HEAD)" "$TAG" | tee "$RUNNER_TEMP/picker-release-ref.txt"
+          gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo 'Dispatched the unchanged publish.yml pipeline at the verified tag.'
+
+      - name: Preserve verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: picker-hotfix-evidence
+          path: |
+            ${{ runner.temp }}/picker-2.1.12.patch
+            ${{ runner.temp }}/picker-baseline.*
+            ${{ runner.temp }}/picker-fixed.*
+            ${{ runner.temp }}/picker-full-verify.log
+            ${{ runner.temp }}/picker-build.log
+            ${{ runner.temp }}/picker-release-ref.txt
+          if-no-files-found: warn
+          retention-days: 30
