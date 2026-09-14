@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BASE: bd78cf21b5d923066e8b91f23add2548e4fe8035
+      BASE: 5fd26079ba68514e8de3b28794d882db737f12d9
       TAG: v2.1.12
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
