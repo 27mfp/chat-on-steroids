@@ -82,6 +82,13 @@ describe('the user’s own connector instructions', () => {
     expect(text).not.toMatch(/This is Chat On Steroids|https:\/\/chatgpt.com\/#settings\/Plugins/);
     expect(serverInstructions(ctx, 'core', 'linux')).toContain('Chat On Steroids Desktop');
   });
+  it('routes Linux browser users to Core for files without advertising native desktop tools', () => {
+    const text = serverInstructions(ctx, 'desktop', 'linux');
+    expect(text).toContain('browser_snapshot');
+    expect(text).toContain('Files, patches and shell commands live in the separate "Chat On Steroids Core" connector.');
+    expect(text).not.toContain('get_window_state');
+    expect(text).not.toContain('Do not poll with a batch that only waits');
+  });
   it('adapts upstream instructions without unsupported facilities and projects live tools', () => {
     const text = serverInstructions(ctx, 'core', 'win32');
     expect(text).toContain('Do not settle for a partial or "helpful enough" solution');

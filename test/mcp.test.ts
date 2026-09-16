@@ -1290,7 +1290,7 @@ describe('desktop capabilities', () => {
     });
     if (!IS_WINDOWS && process.platform !== 'darwin') {
       expect(failed(clicked)).toBe(true);
-      expect(textOf(clicked)).toMatch(/unknown|not found/i);
+      expect(clicked.body.error?.message).toMatch(/unknown|not found/i);
       expect(toolNames(await desktop('tools/list'))).not.toContain('computer');
       return;
     }
