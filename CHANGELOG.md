@@ -11,21 +11,13 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## [2.1.13] — i am very sad. openai theatend to ban my account for whatever reason. anthropic support blocks me. money tight.
 
-2026-09-16.
+refreh your extension and all CoS plugins in chatgpt
 
-The two emails from OpenAI:
+![OpenAI email](docs/images/openai-account-warning-2026-09.png)
 
-![OpenAI email concerning the account](docs/images/openai-account-warning-2026-09.png)
-
-![OpenAI email concerning ChatGPT](docs/images/openai-chatgpt-warning-2026-09.png)
-
-The reply from Anthropic support:
+![OpenAI email](docs/images/openai-chatgpt-warning-2026-09.png)
 
 ![Anthropic support reply](docs/images/anthropic-support-reply-2026-09.png)
-
-- Finish automation follows the current chat's Goal/Loop setting and cancels revoked decisions.
-- Native model discovery recognizes model names with retirement captions and preserves the original selection.
-- Reused workers no longer show the previous assignment's label or completion result as current work.
 
 ## [2.1.11] — 2 weeks 6 sol
 
