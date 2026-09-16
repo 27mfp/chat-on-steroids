@@ -16,7 +16,7 @@ let userData = '';
 let sources = '';
 
 beforeEach(async () => {
-  userData = await fs.mkdtemp(path.join(os.tmpdir(), 'cos-skills-'));
+  userData = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cos-skills-')));
   sources = path.join(userData, 'sources');
   await fs.mkdir(sources);
   await initSkillsPath(userData);

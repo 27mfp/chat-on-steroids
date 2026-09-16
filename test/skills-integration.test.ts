@@ -24,7 +24,7 @@ beforeAll(async () => {
   const config = defaultConfig();
   await saveConfig({ ...config, multiAgent: { ...config.multiAgent, enabled: false, allowUnattributedCalls: true } });
   await fs.mkdir(path.join(directory, 'project'));
-  ctx = { roots: [{ name: 'project', path: path.join(directory, 'project') }], caps: config.capabilities, readOnly: false };
+  ctx = { roots: [{ name: 'project', path: path.join(directory, 'project') }], caps: { ...config.capabilities, screen: true }, readOnly: false };
   await fs.writeFile(path.join(directory, 'review.md'), '# Review\n\nFULL_SKILL_TEXT');
   await importSkillFile(path.join(directory, 'review.md'));
   endpoint = await startMcpServer(() => ctx);
