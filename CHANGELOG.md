@@ -9,10 +9,23 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
-## [2.1.13] — Stability rebuild (unreleased)
+## [2.1.13] — i am very sad. openai theatend to ban my account for whatever reason. anthropic support blocks me. money tight.
+
+2026-09-16.
+
+The two emails from OpenAI:
+
+![OpenAI email concerning the account](docs/images/openai-account-warning-2026-09.png)
+
+![OpenAI email concerning ChatGPT](docs/images/openai-chatgpt-warning-2026-09.png)
+
+The reply from Anthropic support:
+
+![Anthropic support reply](docs/images/anthropic-support-reply-2026-09.png)
 
 - Finish automation follows the current chat's Goal/Loop setting and cancels revoked decisions.
 - Native model discovery recognizes model names with retirement captions and preserves the original selection.
+- Reused workers no longer show the previous assignment's label or completion result as current work.
 
 ## [2.1.11] — 2 weeks 6 sol
 
