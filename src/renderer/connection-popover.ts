@@ -1,4 +1,3 @@
-import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import type { CompanionDiagnostics, CompanionTraceEntry } from '../shared/types.js';
 import { $, toast } from './dom.js';
 import { t, ui } from './i18n.js';
@@ -255,8 +254,7 @@ function detail(list: HTMLElement, term: string, value: string | number | null, 
 
 function paintDiagnostics(
   host: InternalBrowserDockState | null,
-  diagnostics: CompanionDiagnostics | null,
-  preferences: BrowserPreferences | null
+  diagnostics: CompanionDiagnostics | null
 ): void {
   const hostTab = activeInternalTab(host);
   const internal = host?.ready === true;
@@ -328,12 +326,6 @@ function paintDiagnostics(
   $('connectionPipelineWhy').className = flow.bad ? 'is-bad' : '';
   paintCalls(page?.trace ?? []);
 
-  const effectivePreferences = preferences ?? diagnostics?.preferences ?? null;
-  if (effectivePreferences) {
-    $<HTMLInputElement>('connectionAdvancedOverwrite').checked = effectivePreferences.overwrite;
-    $<HTMLInputElement>('connectionAdvancedDurations').checked = effectivePreferences.durations;
-  }
-
   const grid = $('connectionAdvancedGrid');
   grid.replaceChildren();
   detail(grid, 'browser host', internal ? 'Internal Chromium · ready' : 'companion browser');
@@ -367,17 +359,12 @@ export function initConnectionAdvanced(): ConnectionAdvancedController {
   const details = $<HTMLDetailsElement>('connectionAdvanced');
   const refresh = $<HTMLButtonElement>('connectionAdvancedRefresh');
   const copy = $<HTMLButtonElement>('connectionAdvancedCopy');
-  const overwrite = $<HTMLInputElement>('connectionAdvancedOverwrite');
-  const durations = $<HTMLInputElement>('connectionAdvancedDurations');
   let current: CompanionDiagnostics | null = null;
   let host: InternalBrowserDockState | null = null;
-  let preferences: BrowserPreferences | null = null;
   let busy = false;
-  let preferenceBusy = false;
 
   const paintControls = (): void => {
     refresh.disabled = busy;
-    overwrite.disabled = durations.disabled = preferenceBusy || !preferences;
   };
 
   const request = async (): Promise<void> => {
@@ -386,18 +373,14 @@ export function initConnectionAdvanced(): ConnectionAdvancedController {
     $('connectionAdvancedAge').textContent = t('refreshing…');
     paintControls();
     try {
-      const [hostResponse, diagnosticsResponse, preferencesResponse] = await Promise.all([
+      const [hostResponse, diagnosticsResponse] = await Promise.all([
         queryInternalBrowser(),
-        window.api.companionDiagnostics(),
-        window.api.browserPreferences({})
+        window.api.companionDiagnostics()
       ]);
       host = hostResponse.ok ? hostResponse.data : null;
       current = diagnosticsResponse.ok ? diagnosticsResponse.data : null;
-      if (preferencesResponse.ok) preferences = preferencesResponse.data;
-      else if (current) preferences = current.preferences;
-
       if (!host && !current) {
-        paintDiagnostics(null, null, preferences);
+        paintDiagnostics(null, null);
         $('connectionAdvancedAge').textContent = !hostResponse.ok
           ? hostResponse.error
           : !diagnosticsResponse.ok
@@ -406,31 +389,9 @@ export function initConnectionAdvanced(): ConnectionAdvancedController {
         $('connectionAdvancedGrid').replaceChildren();
         return;
       }
-      paintDiagnostics(host, current, preferences);
+      paintDiagnostics(host, current);
     } finally {
       busy = false;
-      paintControls();
-    }
-  };
-
-  const setPreference = async (patch: Partial<BrowserPreferences>): Promise<void> => {
-    if (preferenceBusy) return;
-    preferenceBusy = true;
-    paintControls();
-    try {
-      const response = await window.api.browserPreferences(patch);
-      if (!response.ok) {
-        toast(response.error);
-        paintDiagnostics(host, current, preferences);
-        return;
-      }
-      preferences = response.data;
-      if (current) {
-        current = { ...current, preferences: response.data };
-      }
-      paintDiagnostics(host, current, preferences);
-    } finally {
-      preferenceBusy = false;
       paintControls();
     }
   };
@@ -445,8 +406,6 @@ export function initConnectionAdvanced(): ConnectionAdvancedController {
       });
     });
   }
-  overwrite.addEventListener('change', () => void setPreference({ overwrite: overwrite.checked }));
-  durations.addEventListener('change', () => void setPreference({ durations: durations.checked }));
   refresh.addEventListener('click', () => void request());
   copy.addEventListener('click', () => {
     const lines = [$('connectionPipelineWhy').textContent ?? ''];

@@ -1,3 +1,4 @@
+import type { WorkspaceTerminalEvent, WorkspaceTerminalInfo } from '../shared/workspace-terminal.js';
 import type { ChatModelCatalog } from '../shared/chat-models.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import type { TaskProgress } from '../shared/task-progress.js';
@@ -81,6 +82,16 @@ export interface SessionDetail {
 }
 
 const api = {
+  terminalCreate: (id: string, projectId: string, cols: number, rows: number) => call<WorkspaceTerminalInfo>('workspaceTerminal:request', { action: 'create', id, projectId, cols, rows }),
+  terminalWrite: (id: string, data: string) => call<void>('workspaceTerminal:request', { action: 'write', id, data }),
+  terminalResize: (id: string, cols: number, rows: number) => call<void>('workspaceTerminal:request', { action: 'resize', id, cols, rows }),
+  terminalAck: (id: string, count: number) => call<void>('workspaceTerminal:request', { action: 'ack', id, count }),
+  terminalClose: (id: string) => call<void>('workspaceTerminal:request', { action: 'close', id }),
+  onTerminalEvent: (listener: (event: WorkspaceTerminalEvent) => void): (() => void) => {
+    const wrapped = (_event: unknown, value: WorkspaceTerminalEvent): void => listener(value);
+    ipcRenderer.on('workspaceTerminal:event', wrapped);
+    return () => ipcRenderer.removeListener('workspaceTerminal:event', wrapped);
+  },
   openLegalNotices: () => call<void>('plugins:legalNotices'),
   pluginsSnapshot: () => call<PluginSnapshot>('plugins:snapshot'),
   pluginsInstall: (request: PluginInstallRequest) => call<PluginSnapshot>('plugins:install', request),
@@ -101,9 +112,6 @@ const api = {
   chooseFiles: () => call<InputAttachment[]>('sessions:files'),
   listSkills: () => call<SkillSummary[]>('skills:list'),
   skillLibrary: (scope: SkillsDraftScope) => call<SkillLibrary>('skills:library', scope),
-  importSkill: (kind: 'file' | 'package' = 'file') => call<SkillSummary | null>('skills:import', { kind }),
-  removeSkill: (id: string) => call<boolean>('skills:remove', { id }),
-  openSkillsFolder: () => call<void>('skills:openFolder'),
   dropFiles: async (files: File[]): Promise<Reply<InputAttachment[]>> => {
     if (!files.length || files.length > 20) return { ok: false, error: 'Attach up to 20 files per message' };
     try {

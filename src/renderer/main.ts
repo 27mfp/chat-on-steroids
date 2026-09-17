@@ -6,7 +6,7 @@ import { initPlugins, applyPluginsState } from './plugins.js';
 import { initBrowserPreferences } from './browser-preferences.js';
 import { initConnectionAdvanced } from './connection-popover.js';
 import { initSetupGuide } from './setup-guide.js';
-import { initAppearance, applyAppearance } from './appearance.js';
+import { initAppearance } from './appearance.js';
 import type { AppearanceSettings } from '../shared/appearance.js';
 /**
  * Renderer. No Node, no filesystem, no network — everything goes through window.api.
@@ -48,6 +48,8 @@ declare global {
 const api = window.api;
 initLanguage();
 initSetupGuide();
+// Escape the translucent sidebar's backdrop-filter containing block.
+document.body.append($('connectionPopover'));
 const connectionAdvanced = initConnectionAdvanced();
 const appearance = initAppearance(patch => { void save(patch); });
 
@@ -161,6 +163,8 @@ function setConnectionPopover(open: boolean): void {
   popover.hidden = !open;
   trigger.setAttribute('aria-expanded', String(open));
   if (open) {
+    $<HTMLDetailsElement>('connectionAdvanced').open = false;
+    $<HTMLDetailsElement>('connectionRuntime').open = false;
     positionConnectionPopover();
     paintClock();
     connectionAdvanced.refreshIfOpen();
@@ -173,7 +177,7 @@ function positionConnectionPopover(): void {
   if (popover.hidden) return;
   const trigger = $('sidebarConnection').getBoundingClientRect();
   const margin = 12;
-  const width = Math.min(360, Math.max(0, window.innerWidth - margin * 2));
+  const width = Math.min(300, Math.max(0, window.innerWidth - margin * 2));
   const preferredLeft = trigger.left + trigger.width / 2 - width / 2;
   const maxLeft = Math.max(margin, window.innerWidth - width - margin);
   popover.style.left = `${Math.min(Math.max(margin, preferredLeft), maxLeft)}px`;
@@ -187,20 +191,12 @@ $('workspaceSettings').addEventListener('click', () => showTab('home'));
 $('sidebarConnection').addEventListener('click', () => {
   setConnectionPopover(Boolean($('connectionPopover').hidden));
 });
-$('connectionPopoverSettings').addEventListener('click', () => {
-  setConnectionPopover(false);
-  showAllSteps = true;
-  if (state) apply(state);
-  showTab('setup');
-  step('connect').scrollIntoView({ block: 'center', behavior: 'smooth' });
-});
 $('chatSettingsBtn').addEventListener('click', () => showTab('settings'));
 $('sessionList').addEventListener('click', event => {
   if ((event.target as HTMLElement).closest('[data-id], [data-new-project]')) showTab('chat');
 }, { capture: true });
 $('newChat').addEventListener('click', () => showTab('chat'));
 $('sidebarPlugins').addEventListener('click', () => showTab('plugins'));
-$('sidebarSkills').addEventListener('click', () => showTab('chat'));
 $('addProject').addEventListener('click', () => showTab('chat'));
 $('composerFolder').addEventListener('click', () => $('addProject').click());
 let zoomFactor = 1;
@@ -979,10 +975,16 @@ function apply(next: AppState): void {
 
   // ---- theme
   const appearanceUi = requestedSettings?.ui ?? config.ui;
-  const dark = appearanceUi.theme === 'dark';
   appearance.apply(appearanceUi);
-  $('themeIcon').setAttribute('href', dark ? '#i-sun' : '#i-moon');
-  ui($('themeBtn'), 'title', () => dark ? t("Switch to light mode") : t("Switch to dark mode"));
+
+  const headerConnect = $<HTMLButtonElement>('headerConnect');
+  const wasVisible = !headerConnect.hidden;
+  headerConnect.hidden = connected;
+  headerConnect.disabled = busy;
+  ui(headerConnect, 'textContent', () => busy ? t('Connecting…') : t('Connect'));
+  if (connected && wasVisible && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) $('sidebarConnection').animate([
+    { boxShadow: '0 0 0 0 var(--green)' }, { boxShadow: '0 0 0 12px transparent' }
+  ], { duration: 850, iterations: 2 });
 
   // ---- global connection surface
   const connectionTone = connected ? 'is-connected' : offline ? 'is-offline' : busy ? 'is-busy' : failed ? 'is-error' : '';
@@ -1669,18 +1671,6 @@ $('closeChecks').addEventListener('click', () => {
   $('checksBox').hidden = true;
 });
 
-$('themeBtn').addEventListener('click', () => {
-  if (!state) return;
-  // A save can still be waiting on main-process lifecycle work. Toggle from the latest
-  // requested value, not merely the last acknowledged state, or two quick clicks both choose
-  // the same target and behave like one click.
-  const current = requestedSettings?.ui.theme ?? state.config.ui.theme;
-  const next = current === 'dark' ? 'light' : 'dark';
-  // Applied immediately so the click feels instant; the save confirms it.
-  applyAppearance(next, requestedSettings?.ui.appearance ?? state.config.ui.appearance);
-  void save({ theme: next });
-});
-
 $('readOnlyBtn').addEventListener('click', () => {
   if (!state) return;
   const current = requestedSettings?.readOnly ?? state.config.readOnly;
@@ -1738,6 +1728,14 @@ function installUpdate(): void {
 
 $('updateInstall').addEventListener('click', installUpdate);
 $('installUpdate').addEventListener('click', installUpdate);
+$('headerConnect').addEventListener('click', async () => {
+  if (!state) return;
+  if (missingStep(state)) { showTab('setup'); return; }
+  if (isRunning(state.status.state)) {
+    const disconnected = await run(api.disconnect()); if (!disconnected) return; apply(disconnected);
+  }
+  const connected = await run(api.connect()); if (connected) apply(connected);
+});
 $('connectionPopoverToggle').addEventListener('click', () => void toggleConnection());
 $('wizConnect').addEventListener('click', () => void toggleConnection());
 
@@ -1808,7 +1806,7 @@ for (const id of [
 
 document.addEventListener('click', (event) => {
   const target = event.target as HTMLElement;
-  if (!target.closest('.connection-anchor') && !$('connectionPopover').hidden) setConnectionPopover(false);
+  if (!target.closest('.connection-anchor') && !$('connectionPopover').contains(target) && !$('connectionPopover').hidden) setConnectionPopover(false);
   const link = target.closest<HTMLElement>('[data-link]');
   if (link?.dataset.link) void run(api.openLink(link.dataset.link));
 });

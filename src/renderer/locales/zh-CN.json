@@ -1319,5 +1319,22 @@
   "Preferences": "偏好设置",
   "Theme": "主题",
   "Light": "浅色",
-  "Dark": "深色"
+  "Dark": "深色",
+  "Commands": "命令",
+  "Compact": "压缩",
+  "Add Skills": "添加技能",
+  "Turn the next composer request into editable stages.": "将下一条请求转换为可编辑的阶段。",
+  "Pursue a saved objective and stop when it is complete.": "完成已保存的目标后停止。",
+  "Keep continuing toward the saved objective.": "继续处理已保存的目标。",
+  "Compact this chat and resume it in a fresh conversation.": "压缩此聊天并在新对话中继续。",
+  "Terminal": "终端",
+  "Toggle terminal": "显示或隐藏终端",
+  "Toggle terminal (Ctrl+`)": "显示或隐藏终端 (Ctrl+`)",
+  "New terminal": "新建终端",
+  "Hide terminal": "隐藏终端",
+  "Close terminal": "关闭终端",
+  "Terminal height": "终端高度",
+  "Open a terminal in this project": "在此项目中打开终端",
+  "Select a project to open a terminal": "选择一个项目以打开终端",
+  "Terminal input is busy. Try a smaller paste.": "终端输入繁忙，请减少粘贴的文本。"
 }

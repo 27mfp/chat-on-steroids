@@ -89,7 +89,7 @@ function slugSkillId(value: string): string {
 
 function importId(sourcePath: string): string {
   const extension = path.extname(sourcePath).toLowerCase();
-  if (extension !== '.md' && extension !== '.txt') throw new Error('Choose one Markdown or text skill file');
+  if (extension !== '.md') throw new Error('Choose one Markdown (.md) skill file');
   const filename = path.basename(sourcePath);
   const sourceName = filename.toLowerCase() === 'skill.md'
     ? path.basename(path.dirname(sourcePath))

@@ -7,6 +7,7 @@ import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import type { Handoff, SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import type { LocalProject } from '../src/shared/projects.js';
+vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ update: vi.fn() }) }));
 import { positionOf } from '../src/shared/chronology.js';
 
 /**
@@ -1147,8 +1148,8 @@ it.each([false, true])('removes a project group in one click, keeps its chats an
     api.skillLibrary = () => Promise.resolve({ ok: true, data: { skills: [
       { id: 'review', name: 'Review', description: '', path: '/skills/review/SKILL.md', scope: 'managed', source: 'managed', managed: true, allowImplicitInvocation: true }
     ], roots: [], errors: [], includeInstructions: true } });
-    w.document.getElementById('sidebarSkills')!.click(); await settle();
-    w.document.querySelector<HTMLButtonElement>('.skill-use')!.click();
+    input.value = '/re\n' + input.value; input.setSelectionRange(3, 3); input.dispatchEvent(new w.Event('input', { bubbles: true })); await settle();
+    w.document.querySelector<HTMLButtonElement>('.skill-choice[data-skill-id="review"]')!.click();
   }
   let finishList!: (value: unknown) => void;
   api.listSessions = () => new Promise(resolve => { finishList = resolve; });
@@ -1298,9 +1299,9 @@ it('retires a pending Skills picker when sending replaces its draft', async () =
   let resolve!: (value: unknown) => void;
   (w as any).api.skillLibrary = () => new Promise(done => { resolve = done; });
   const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
-  input.value = 'Complete my task';
-  (w.document.getElementById('composerSkills') as HTMLButtonElement).click();
-  expect((w.document.getElementById('skillsDialog') as HTMLDialogElement).open).toBe(true);
+  input.value = '/'; input.setSelectionRange(1, 1); input.dispatchEvent(new w.Event('input', { bubbles: true }));
+  expect((w.document.getElementById('skillPicker') as HTMLElement).hidden).toBe(false);
+  input.value = 'Complete my task'; input.dispatchEvent(new w.Event('input', { bubbles: true }));
   w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   await settle();
   expect(live.sent[0]?.text).toBe('Complete my task');
@@ -1312,7 +1313,7 @@ it('retires a pending Skills picker when sending replaces its draft', async () =
   expect((w.document.getElementById('skillPicker') as HTMLElement).hidden).toBe(true);
 });
 
-it('uses the sidebar Skills library and delivers the selected directive once with the unchanged task', async () => {
+it('uses slash Skills completion and delivers the selected directive once with the unchanged task', async () => {
   const { w, live } = await boot([], false);
   (w as any).api.skillLibrary = vi.fn(async () => ({ ok: true, data: { skills: [
     { id: 'review', name: 'Review code', description: 'Inspect before editing', path: '/skills/review/SKILL.md', managed: true, source: 'managed', scope: 'managed', allowImplicitInvocation: true }
@@ -1320,8 +1321,8 @@ it('uses the sidebar Skills library and delivers the selected directive once wit
   const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
   input.value = 'Do my entire task.\nKeep the second line.';
   input.dispatchEvent(new w.Event('input', { bubbles: true }));
-  w.document.getElementById('sidebarSkills')!.click(); await settle();
-  w.document.querySelector<HTMLButtonElement>('.skill-use')!.click();
+  input.value = '/re\n' + input.value; input.setSelectionRange(3, 3); input.dispatchEvent(new w.Event('input', { bubbles: true })); await settle();
+  w.document.querySelector<HTMLButtonElement>('.skill-choice[data-skill-id="review"]')!.click();
   expect(input.value).toBe('Do my entire task.\nKeep the second line.');
   expect(w.document.querySelectorAll('.composer-selected-skill')).toHaveLength(1);
   w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));

@@ -1,7 +1,6 @@
 const STORAGE_KEY = 'chat-on-steroids.work-panel-width';
 const MIN_WIDTH = 280;
 const MIN_MAIN_WIDTH = 360;
-const MAX_WIDTH = 820;
 
 function hostWidth(host: HTMLElement): number {
   const measured = host.getBoundingClientRect().width || host.clientWidth || host.ownerDocument.defaultView?.innerWidth || 0;
@@ -9,7 +8,7 @@ function hostWidth(host: HTMLElement): number {
 }
 
 function maximum(host: HTMLElement): number {
-  return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, hostWidth(host) - MIN_MAIN_WIDTH));
+  return Math.max(MIN_WIDTH, hostWidth(host) - MIN_MAIN_WIDTH);
 }
 
 function currentWidth(host: HTMLElement, pane: HTMLElement): number {

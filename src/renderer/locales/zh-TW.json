@@ -1353,5 +1353,22 @@
   "Preferences": "偏好設定",
   "Theme": "主題",
   "Light": "淺色",
-  "Dark": "深色"
+  "Dark": "深色",
+  "Commands": "指令",
+  "Compact": "壓縮",
+  "Add Skills": "新增技能",
+  "Turn the next composer request into editable stages.": "將下一則請求轉換為可編輯的階段。",
+  "Pursue a saved objective and stop when it is complete.": "完成已儲存的目標後停止。",
+  "Keep continuing toward the saved objective.": "繼續處理已儲存的目標。",
+  "Compact this chat and resume it in a fresh conversation.": "壓縮此聊天並在新對話中繼續。",
+  "Terminal": "終端機",
+  "Toggle terminal": "顯示或隱藏終端機",
+  "Toggle terminal (Ctrl+`)": "顯示或隱藏終端機 (Ctrl+`)",
+  "New terminal": "新增終端機",
+  "Hide terminal": "隱藏終端機",
+  "Close terminal": "關閉終端機",
+  "Terminal height": "終端機高度",
+  "Open a terminal in this project": "在此專案中開啟終端機",
+  "Select a project to open a terminal": "選擇一個專案以開啟終端機",
+  "Terminal input is busy. Try a smaller paste.": "終端機輸入忙碌，請減少貼上的文字。"
 }

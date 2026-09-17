@@ -1,8 +1,9 @@
+import { registerWorkspaceTerminalIpc } from './workspace-terminal-ipc.js';
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
 import { appearanceSchema } from './appearance-schema.js';
 import { mergeAppearance } from '../shared/appearance.js';
 import { prepareSessionPrompt, prepareSkillFollowup } from './session/prompt.js';
-import { importSkillFile, importSkillPackage, listSkills, removeSkill, skillsDirectory } from './skills.js';
+import { listSkills } from './skills.js';
 import { listSkillLibrary } from './skill-library.js';
 import { noteChatOrigin } from './session/recorder.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
@@ -408,6 +409,7 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
 }
 
 export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall: () => void): void {
+  registerWorkspaceTerminalIpc(getWindow);
   let watchedWindow: BrowserWindow | null = null;
   const projectFileWatches = new ProjectFileWatchSet(event => {
     const target = getWindow();
@@ -573,34 +575,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const library = await listSkillLibrary({ projectPath: before?.real ?? null });
     if ((await folder())?.real !== before?.real) throw new Error('The project changed while Skills were loading');
     return library;
-  });
-  handle('skills:import', async payload => {
-    const { kind } = z.object({ kind: z.enum(['file', 'package']).default('file') }).parse(payload ?? {});
-    const window = getWindow();
-    if (!window) throw new Error('No window');
-    const result = await dialog.showOpenDialog(window, kind === 'package'
-      ? { title: 'Import Skill package', properties: ['openDirectory'] }
-      : { title: 'Import skill', properties: ['openFile'], filters: [{ name: 'Skill instructions', extensions: ['md', 'txt'] }] });
-    return result.canceled || !result.filePaths[0] ? null
-      : kind === 'package' ? importSkillPackage(result.filePaths[0]) : importSkillFile(result.filePaths[0]);
-  });
-  handle('skills:openFolder', async () => {
-    await listSkills();
-    const directory = skillsDirectory();
-    if (!directory) throw new Error('Skills storage is not ready');
-    const error = await shell.openPath(directory);
-    if (error) throw new Error(error);
-  });
-  handle('skills:remove', async payload => {
-    const { id } = z.object({ id: z.string().min(1).max(64) }).strict().parse(payload);
-    const window = getWindow(); if (!window) throw new Error('No window');
-    const skill = (await listSkills()).find(row => row.id === id);
-    if (!skill) throw new Error('Only installed personal Skills can be removed here');
-    const result = await dialog.showMessageBox(window, { type: 'question', message: `Move "${skill.name}" and its resources to the Trash?`,
-      buttons: ['Cancel', 'Move to Trash'], defaultId: 0, cancelId: 0 });
-    if (result.response !== 1) return false;
-    await removeSkill(id, directory => shell.trashItem(directory));
-    return true;
   });
   handle('projects:remove', async (payload) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(payload);

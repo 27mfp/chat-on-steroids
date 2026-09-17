@@ -523,7 +523,8 @@ describe('the window as a whole', () => {
       '.msg.rich .markdown-table',
       '.file-preview-markdown pre',
       '.file-preview-markdown-table',
-      '.file-pdf-viewport'
+      '.file-pdf-viewport',
+      '.terminal-tabs'
     ]);
     expect(css).not.toMatch(/overflow:\s*(auto|scroll)\s+/);
     // The one scrolling surface in the app is vertical only.

@@ -1,3 +1,4 @@
+vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ update: vi.fn() }) }));
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
@@ -16,6 +17,7 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
   const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
   dom = new JSDOM(html, { url: 'https://local.test/', pretendToBeVisual: true });
   const w = dom.window;
+  w.HTMLElement.prototype.animate = vi.fn() as any;
   Object.assign(globalThis, {
     window: w,
     document: w.document,
@@ -172,6 +174,7 @@ it('serializes settings intent so rapid toggles and later UI changes cannot undo
   const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
   dom = new JSDOM(html, { url: 'https://local.test/', pretendToBeVisual: true });
   const w = dom.window;
+  w.HTMLElement.prototype.animate = vi.fn() as any;
   Object.assign(globalThis, {
     window: w,
     document: w.document,
@@ -275,13 +278,13 @@ it('serializes settings intent so rapid toggles and later UI changes cannot undo
   pending.shift()!({ ok: true, data: current });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  // Theme has the same no-form-control shape. Two rapid clicks must request dark then light,
+  // Appearance changes must request dark then light in order,
   // even though the first dark save has not answered yet.
-  const theme = w.document.getElementById('themeBtn') as HTMLButtonElement;
-  theme.click();
+  const theme = w.document.getElementById('appearanceTheme') as HTMLSelectElement;
+  theme.value = 'dark'; theme.dispatchEvent(new w.Event('change', { bubbles: true }));
   await vi.waitFor(() => expect(calls).toHaveLength(4));
   expect(calls[3].ui.theme).toBe('dark');
-  theme.click();
+  theme.value = 'light'; theme.dispatchEvent(new w.Event('change', { bubbles: true }));
   expect(calls).toHaveLength(4);
 
   current = appState({ ...baseConfig, readOnly: false, ui: { ...baseConfig.ui, autoConnect: true, theme: 'dark' } });
@@ -320,6 +323,7 @@ async function mountChat(
   const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
   dom = new JSDOM(html, { url: 'https://local.test/', pretendToBeVisual: true });
   const w = dom.window;
+  w.HTMLElement.prototype.animate = vi.fn() as any;
   Object.assign(globalThis, { Event: w.Event });
   Object.assign(globalThis, {
     window: w,
@@ -535,7 +539,15 @@ it('keeps global connection controls in a compact sidebar popover', async () => 
   trigger.click();
   expect(popover.hidden).toBe(false);
   expect(trigger.getAttribute('aria-expanded')).toBe('true');
-  expect(popover.style.left).toBe('38px');
+  expect(popover.style.left).toBe('68px');
+  expect(popover.parentElement).toBe(doc.body);
+  expect(doc.getElementById('connectionPopoverSettings')).toBeNull();
+  const advanced = doc.getElementById('connectionAdvanced') as HTMLDetailsElement;
+  const runtime = doc.getElementById('connectionRuntime') as HTMLDetailsElement;
+  advanced.open = runtime.open = true;
+  trigger.click(); trigger.click();
+  expect(advanced.open).toBe(false);
+  expect(runtime.open).toBe(false);
   expect(doc.getElementById('connectionPopoverConnector')!.textContent).toMatch(/Reached/i);
   expect(doc.getElementById('connectionPopoverBrowser')!.textContent).toMatch(/Seen/i);
   expect(doc.getElementById('connectionPopoverExtension')!.textContent).toBe('v2.1.13');

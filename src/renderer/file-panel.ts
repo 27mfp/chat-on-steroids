@@ -45,6 +45,16 @@ function baseName(relative: string): string {
   return at < 0 ? relative : relative.slice(at + 1);
 }
 
+// IPC supplies fresh objects even when the file did not change. All preview fields
+// are primitives, including bounded content; compare the complete projection rather
+// than timestamps or encoded lengths (which can miss same-size replacements).
+function samePreview(a: ProjectFilePreview | null, b: ProjectFilePreview | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const keys = Object.keys(a) as (keyof ProjectFilePreview)[];
+  return keys.length === Object.keys(b).length && keys.every(key => a[key] === b[key]);
+}
+
 function humanBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
@@ -220,18 +230,9 @@ export function createFilePanel(options: FilePanelOptions) {
   ui(pane, 'aria-label', () => t('Files'));
   attachWorkPanelResize(options.host, pane);
 
-  const header = el('div', 'file-panel-header');
-  const heading = el('div', 'file-panel-heading');
-  const title = el('strong', '', () => t('Files'));
-  const projectLabel = el('span', 'file-panel-project');
-  heading.append(title, projectLabel);
-  const refresh = el('button', 'btn btn-icon') as HTMLButtonElement;
+  const refresh = el('button', 'btn btn-icon file-panel-refresh') as HTMLButtonElement;
   refresh.type = 'button'; refresh.append(icon('i-pulse'));
   ui(refresh, 'title', () => t('Refresh files')); ui(refresh, 'aria-label', () => t('Refresh files'));
-  const close = el('button', 'btn btn-icon file-panel-close') as HTMLButtonElement;
-  close.type = 'button'; close.append(icon('i-x'));
-  ui(close, 'aria-label', () => t('Close Files'));
-  header.append(heading, refresh, close);
 
   const toolbar = el('div', 'file-panel-toolbar');
   const newFile = actionButton(() => t('New file'), 'i-plus', () => createEntry('file'));
@@ -239,7 +240,7 @@ export function createFilePanel(options: FilePanelOptions) {
   const rename = actionButton(() => t('Rename'), 'i-pencil', renameSelection);
   const remove = actionButton(() => t('Delete'), 'i-trash', deleteSelection);
   const reveal = actionButton(() => t('Reveal'), 'i-out', revealSelection);
-  toolbar.append(newFile, newFolder, rename, remove, reveal);
+  toolbar.append(newFile, newFolder, rename, remove, reveal, refresh);
 
   const body = el('div', 'file-panel-body');
   const tree = el('div', 'file-tree'); tree.setAttribute('role', 'tree');
@@ -250,13 +251,15 @@ export function createFilePanel(options: FilePanelOptions) {
   previewResize.setAttribute('aria-orientation', 'horizontal');
   previewResize.setAttribute('aria-label', 'Resize file preview');
   body.append(tree, preview);
-  pane.append(header, toolbar, body); options.host.append(pane);
+  pane.append(toolbar, body); options.host.append(pane);
 
   let project: LocalProject | null = null;
   let generation = 0;
   let selection: Selection = { path: '', kind: 'root' };
   let previewPath: string | null = null;
   let previewValue: ProjectFilePreview | null = null;
+  let renderedPreview: ProjectFilePreview | null = null;
+  let pendingCodePreview: ProjectFilePreview | null = null;
   let codeEditor: ProjectCodeEditor | null = null;
   let codeViewer: ProjectCodeEditor | null = null;
   let pdfViewer: ProjectPdfViewer | null = null;
@@ -319,6 +322,7 @@ export function createFilePanel(options: FilePanelOptions) {
   }
 
   function replacePreview(...nodes: Node[]): void {
+    renderedPreview = null;
     preview.replaceChildren(previewResize, ...nodes);
   }
 
@@ -332,12 +336,15 @@ export function createFilePanel(options: FilePanelOptions) {
   }
 
   function destroyCodeViewer(): void {
+    pendingCodePreview = null;
+    renderedPreview = null;
     viewerMountToken++;
     codeViewer?.destroy();
     codeViewer = null;
   }
 
   function destroyPdfViewer(): void {
+    renderedPreview = null;
     pdfMountToken++;
     pdfAbort?.abort(); pdfAbort = null;
     pdfViewer?.destroy();
@@ -505,19 +512,24 @@ export function createFilePanel(options: FilePanelOptions) {
 
   async function selectFile(entry: ProjectFileEntry): Promise<void> {
     if (entry.path === editingPath) return;
-    if (editingPath && !(await leaveEditorIfNeeded())) return;
-    selection = { path: entry.path, kind: entry.kind };
-    previewPath = null; previewValue = null;
-    render();
-    if (entry.kind !== 'file' || !project) return;
+    if (editingPath) {
+      if (!(await leaveEditorIfNeeded())) return;
+      renderPreview();
+    }
+    if (entry.kind !== 'file' || !project) {
+      selection = { path: entry.path, kind: entry.kind };
+      previewPath = null; previewValue = null; render(); return;
+    }
     const request = ++generation;
     const current = project;
-    previewPath = entry.path;
-    renderPreviewLoading(entry.path);
+    const previousSelection = selection;
+    // Keep the last accepted file visible until the replacement is available. No
+    // intermediate empty/loading panel, and no old response after newer navigation.
     const value = await run(window.api.previewProjectFile(current.id, entry.path));
-    if (!value || request !== generation || project?.id !== current.id || selection.path !== entry.path) return;
+    if (!value || request !== generation || project?.id !== current.id || selection !== previousSelection || editingPath) return;
+    selection = { path: entry.path, kind: entry.kind };
     previewValue = value; previewPath = entry.path;
-    renderPreview();
+    render();
   }
 
   function treeRow(entry: ProjectFileEntry, depth: number): HTMLElement {
@@ -525,6 +537,9 @@ export function createFilePanel(options: FilePanelOptions) {
     row.type = 'button'; row.dataset.path = entry.path; row.dataset.kind = entry.kind;
     row.style.setProperty('--file-depth', String(depth));
     row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(depth + 2));
+    row.setAttribute('aria-selected', String(selection.path === entry.path));
+    row.tabIndex = selection.path === entry.path ? 0 : -1;
     if (entry.kind === 'directory') row.setAttribute('aria-expanded', String(expanded.has(entry.path)));
     const disclosure = el('span', `file-tree-disclosure${entry.kind === 'directory' && expanded.has(entry.path) ? ' is-open' : ''}`);
     disclosure.setAttribute('aria-hidden', 'true');
@@ -550,6 +565,7 @@ export function createFilePanel(options: FilePanelOptions) {
   }
 
   function renderTree(): void {
+    const focused = tree.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.path : undefined;
     tree.replaceChildren();
     if (!project) {
       tree.append(el('p', 'meta', () => t('Files is available only for chats in a local project.')));
@@ -557,6 +573,9 @@ export function createFilePanel(options: FilePanelOptions) {
     }
     const root = el('button', `file-tree-root${selection.path === '' ? ' is-selected' : ''}`) as HTMLButtonElement;
     root.type = 'button'; root.setAttribute('role', 'treeitem'); root.setAttribute('aria-expanded', 'true');
+    root.dataset.path = ''; root.dataset.kind = 'root';
+    root.setAttribute('aria-level', '1'); root.setAttribute('aria-selected', String(selection.path === ''));
+    root.tabIndex = selection.path === '' ? 0 : -1;
     root.append(icon('i-folder', 'file-tree-icon'), el('strong', 'file-tree-name', project.name));
     root.title = project.path;
     root.onclick = () => void (async () => {
@@ -565,21 +584,45 @@ export function createFilePanel(options: FilePanelOptions) {
     })();
     tree.append(root);
     const fragment = document.createDocumentFragment(); appendDirectory(fragment, '', 0); tree.append(fragment);
+    const rows = [...tree.querySelectorAll<HTMLButtonElement>('[role="treeitem"]')];
+    if (!rows.some(row => row.tabIndex === 0)) root.tabIndex = 0;
+    if (focused !== undefined) {
+      let path = focused;
+      while (!rows.some(row => row.dataset.path === path) && path) path = parentPath(path);
+      rows.find(row => row.dataset.path === path)?.focus({ preventScroll: true });
+    }
   }
 
-  function renderPreviewLoading(relative: string): void {
-    destroyCodeViewer();
-    destroyPdfViewer();
-    preview.classList.remove('is-editing');
-    preview.hidden = false;
-    replacePreview(
-      el('div', 'file-preview-head', baseName(relative)),
-      el('p', 'file-preview-loading', () => t('Loading preview…'))
-    );
-  }
+  tree.addEventListener('focusin', event => {
+    const row = (event.target as HTMLElement).closest<HTMLButtonElement>('[role="treeitem"]');
+    if (!row) return;
+    for (const item of tree.querySelectorAll<HTMLButtonElement>('[role="treeitem"]')) item.tabIndex = item === row ? 0 : -1;
+  });
+  tree.addEventListener('keydown', event => {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const rows = [...tree.querySelectorAll<HTMLButtonElement>('[role="treeitem"]')];
+    const row = (event.target as HTMLElement).closest<HTMLButtonElement>('[role="treeitem"]');
+    if (!row) return;
+    const index = rows.indexOf(row);
+    let next: HTMLButtonElement | undefined;
+    if (event.key === 'ArrowDown') next = rows[Math.min(index + 1, rows.length - 1)];
+    else if (event.key === 'ArrowUp') next = rows[Math.max(0, index - 1)];
+    else if (event.key === 'Home') next = rows[0];
+    else if (event.key === 'End') next = rows.at(-1);
+    else if (event.key === 'ArrowRight') {
+      if (row.getAttribute('aria-expanded') === 'false') row.click();
+      else if (row.hasAttribute('aria-expanded')) next = rows[index + 1];
+    } else if (event.key === 'ArrowLeft') {
+      if (row.dataset.kind === 'directory' && row.getAttribute('aria-expanded') === 'true') row.click();
+      else next = rows.find(item => item.dataset.path === parentPath(row.dataset.path ?? ''));
+    } else return;
+    event.preventDefault();
+    next?.focus();
+  });
 
   async function closePreview(): Promise<void> {
     if (editingPath && !(await leaveEditorIfNeeded())) return;
+    generation++;
     previewPath = null;
     previewValue = null;
     renderPreview();
@@ -591,12 +634,23 @@ export function createFilePanel(options: FilePanelOptions) {
     return button;
   }
 
+  function previewTreeButton(): HTMLButtonElement {
+    const button = actionButton(() => t('Files'), 'i-folder', () => {
+      body.classList.toggle('is-reading');
+      button.setAttribute('aria-pressed', String(!body.classList.contains('is-reading')));
+    });
+    button.classList.add('file-preview-toggle-tree');
+    button.setAttribute('aria-pressed', String(!body.classList.contains('is-reading')));
+    return button;
+  }
+
   function viewerHeader(value: ProjectFilePreview): HTMLElement {
     const head = el('div', 'file-preview-head');
     const nameWrap = el('div', 'file-preview-title');
     const name = el('strong', '', value.name); name.title = value.path;
     nameWrap.append(name);
     const actions = el('div', 'file-preview-actions');
+    actions.append(previewTreeButton());
     if (editablePreview(value)) {
       actions.append(actionButton(() => t('Edit'), 'i-pencil', () => startEditing(value)));
     }
@@ -681,7 +735,7 @@ export function createFilePanel(options: FilePanelOptions) {
     save.disabled = true;
     editorSaveButton = save;
     const view = actionButton(() => t('View'), 'i-eye', stopEditing);
-    actions.append(save, view, previewCloseButton());
+    actions.append(save, view, previewTreeButton(), previewCloseButton());
     head.append(titleWrap, actions);
 
     const languageLabel = el('span', 'file-editor-language', () => t('Detecting language…'));
@@ -714,8 +768,9 @@ export function createFilePanel(options: FilePanelOptions) {
     created.focus();
   }
 
-  async function mountCodeViewer(value: ProjectFilePreview & { text: string }, host: HTMLElement, languageLabel: HTMLElement): Promise<void> {
+  async function mountCodeViewer(value: ProjectFilePreview & { text: string }, host: HTMLElement, languageLabel: HTMLElement, publish: () => void): Promise<void> {
     const token = ++viewerMountToken;
+    pendingCodePreview = value;
     const module = await import('./file-code-editor.js');
     if (token !== viewerMountToken || editingPath || previewPath !== value.path || selection.path !== value.path) return;
     const created = await module.createProjectCodeEditor({
@@ -728,8 +783,9 @@ export function createFilePanel(options: FilePanelOptions) {
       created.destroy();
       return;
     }
-    codeViewer = created;
     languageLabel.textContent = created.language;
+    publish();
+    codeViewer = created;
   }
 
   async function mountPdfViewer(value: ProjectFilePreview & { pdfDataBase64: string }, host: HTMLElement, revision: string): Promise<void> {
@@ -752,23 +808,21 @@ export function createFilePanel(options: FilePanelOptions) {
 
   function renderPreview(): void {
     if (editingPath && editingPath === previewPath && selection.path === previewPath) return;
-    const currentPdfRevision = previewValue ? pdfPreviewRevision(previewValue) : null;
-    // Session-list paints and directory watcher refreshes are unrelated to the PDF surface most
-    // of the time. Keep the exact mounted PDF DOM alive until the selected file revision actually
-    // changes; destroying/recreating the whole PDF viewer here was the remaining source of
-    // occasional flashes even after canvas rendering itself became double-buffered.
-    if (currentPdfRevision && previewPath === selection.path && pdfSurfaceRevision === currentPdfRevision && preview.classList.contains('has-pdf-viewer')) {
+    // Routine session paints and unrelated directory events do not own the viewer's
+    // lifetime. Keep its DOM, scroll, selection and in-flight language/PDF loader.
+    if (renderedPreview && previewPath === selection.path && samePreview(renderedPreview, previewValue)) {
       preview.hidden = false;
       return;
     }
-    destroyCodeViewer();
-    destroyPdfViewer();
     if (!previewPath || !previewValue || selection.path !== previewPath) {
+      destroyCodeViewer();
+      destroyPdfViewer();
+      body.classList.remove('is-reading');
       preview.classList.remove('is-editing');
       preview.hidden = true; replacePreview(); return;
     }
+    if (pendingCodePreview && samePreview(pendingCodePreview, previewValue)) return;
     const value = previewValue;
-    preview.classList.remove('is-editing', 'has-code-viewer', 'has-pdf-viewer');
     const head = viewerHeader(value);
     const meta = el('div', 'file-preview-meta');
     meta.append(el('span', '', `${value.path} · ${humanBytes(value.bytes)} · ${new Date(value.modifiedAt).toLocaleString()}`));
@@ -776,6 +830,7 @@ export function createFilePanel(options: FilePanelOptions) {
     let viewerHost: HTMLElement | null = null;
     let languageLabel: HTMLElement | null = null;
     let pdfHost: HTMLElement | null = null;
+    let surfaceClass: string | null = null;
     if (value.imageDataUrl && value.imageMimeType) {
       const wrap = el('div', 'file-preview-image-wrap');
       const image = document.createElement('img');
@@ -787,7 +842,7 @@ export function createFilePanel(options: FilePanelOptions) {
       content = wrap;
     } else if (value.pdfDataBase64) {
       pdfHost = el('div', 'file-pdf-viewer-host');
-      preview.classList.add('has-pdf-viewer');
+      surfaceClass = 'has-pdf-viewer';
       content = pdfHost;
     } else if (value.binary) {
       content = el('p', 'file-preview-empty', value.note ?? (() => t('Binary file · preview unavailable')));
@@ -800,13 +855,23 @@ export function createFilePanel(options: FilePanelOptions) {
       languageLabel = el('span', 'file-editor-language', () => t('Detecting language…'));
       meta.append(languageLabel);
       viewerHost = el('div', 'file-code-editor-host file-code-viewer-host');
-      preview.classList.add('has-code-viewer');
+      surfaceClass = 'has-code-viewer';
       content = viewerHost;
     }
-    replacePreview(head, meta, content);
-    if (value.truncated) preview.append(el('div', 'file-preview-truncated', () => t('Preview truncated.')));
-    preview.hidden = false;
-    if (viewerHost && languageLabel && value.text !== null) void mountCodeViewer(value as ProjectFilePreview & { text: string }, viewerHost, languageLabel);
+    const publish = (): void => {
+      destroyCodeViewer(); destroyPdfViewer();
+      preview.classList.remove('is-editing', 'has-code-viewer', 'has-pdf-viewer');
+      if (surfaceClass) preview.classList.add(surfaceClass);
+      replacePreview(head, meta, content);
+      renderedPreview = value;
+      if (value.truncated) preview.append(el('div', 'file-preview-truncated', () => t('Preview truncated.')));
+      preview.hidden = false;
+    };
+    if (viewerHost && languageLabel && value.text !== null) {
+      void mountCodeViewer(value as ProjectFilePreview & { text: string }, viewerHost, languageLabel, publish);
+      return;
+    }
+    publish();
     if (pdfHost && value.pdfDataBase64) {
       const revision = pdfPreviewRevision(value)!;
       pdfSurfaceRevision = revision;
@@ -815,7 +880,6 @@ export function createFilePanel(options: FilePanelOptions) {
   }
 
   function render(): void {
-    projectLabel.textContent = project?.name ?? '';
     renderTree();
     if (!pane.hidden) renderPreview();
     updateActions();
@@ -867,6 +931,7 @@ export function createFilePanel(options: FilePanelOptions) {
       if (fresh.revision !== previewValue?.revision) markEditorExternalChange();
       return;
     }
+    if (samePreview(previewValue, fresh)) return;
     previewValue = fresh;
     if (editingPath === relative) {
       if (editablePreview(fresh)) await startEditing(fresh);
@@ -912,6 +977,13 @@ export function createFilePanel(options: FilePanelOptions) {
     const current = project;
     if (!current) return;
     const directory = selectedDirectory(), expected = generation;
+    // Creation selects the new entry, so it must leave the current editor through
+    // the same draft guard as navigation, rename and delete.
+    if (editingPath) {
+      if (!(await leaveEditorIfNeeded())) return;
+      renderPreview();
+    }
+    if (expected !== generation || project?.id !== current.id) return;
     const name = await requestEntryName({
       title: kind === 'file' ? t('New file') : t('New folder'),
       confirm: t('Create')
@@ -991,7 +1063,6 @@ export function createFilePanel(options: FilePanelOptions) {
   }
 
   refresh.onclick = () => void refreshAll();
-  close.onclick = hide;
   pane.addEventListener('keydown', event => {
     if (editingPath && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
       event.preventDefault();
@@ -1011,6 +1082,7 @@ export function createFilePanel(options: FilePanelOptions) {
     visible: () => !pane.hidden,
     update(next: LocalProject | null): void {
       const changed = project?.id !== next?.id;
+      const labelChanged = project?.name !== next?.name || project?.path !== next?.path;
       if (changed && project && editingPath && editorDirty && previewValue && editablePreview(previewValue)) {
         retainedDrafts.set(project.id, { preview: previewValue, text: codeEditor?.getValue() ?? editorDraft });
       }
@@ -1018,7 +1090,10 @@ export function createFilePanel(options: FilePanelOptions) {
       if (changed) watchSignature = '';
       options.toggle.hidden = next === null;
       ui(options.toggle, 'title', () => next ? t('Files · {0}', [next.name]) : t('Files'));
-      if (!changed) { render(); return; }
+      if (!changed) {
+        if (labelChanged) renderTree();
+        return;
+      }
       if (editingPath) {
         clearEditorState();
       }

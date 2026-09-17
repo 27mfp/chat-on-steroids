@@ -1,3 +1,4 @@
+import { createWorkspaceTerminal } from './workspace-terminal.js';
 import { ui, t } from './i18n.js';
 import { initSkills } from './skills.js';
 import { imageStorageButton } from './image-storage.js';
@@ -138,6 +139,8 @@ const projectVisibleCounts = new Map<string, number>();
 function projectGroup(id: string | null | undefined): string | null {
   return id && !projects.find(project => project.id === id)?.ungrouped ? id : null;
 }
+let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
+
 function selectedLocalProject(): LocalProject | null {
   if (selectedId) {
     const selected = sessions.find(row => row.id === selectedId);
@@ -751,6 +754,7 @@ function paintSessions(): void {
     ?.querySelector<HTMLElement>('.project-heading')?.focus({ preventScroll: true });
   agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
   filePanel?.update(selectedLocalProject());
+  workspaceTerminal?.update(selectedLocalProject());
   badgeKey = badgeSignature();
   $('projectsEmpty').hidden = projectSections.length > 0;
   $('sessionsEmpty').hidden = rows.length > 0;
@@ -3817,7 +3821,7 @@ export function initChat(next: Deps): void {
   const agentToggle = el('button', 'btn btn-icon', '◫') as HTMLButtonElement;
   agentToggle.id = 'agentPanelToggle'; agentToggle.type = 'button'; agentToggle.hidden = true;
   ui(agentToggle, 'aria-label', () => t("Toggle sub-agent side panel")); agentToggle.setAttribute('aria-expanded', 'false');
-  $('themeBtn').before(fileToggle, agentToggle);
+  $('headerConnect').after(fileToggle, agentToggle);
   const agentToolGroups = new Map<string, HTMLDetailsElement>();
   agentPanel = createAgentPanel({
     host: document.querySelector<HTMLElement>('[data-panel="chat"]')!, toggle: agentToggle,
@@ -4003,18 +4007,23 @@ export function initChat(next: Deps): void {
     }
   });
   filePanel.update(selectedLocalProject());
+  workspaceTerminal = createWorkspaceTerminal();
+  workspaceTerminal.update(selectedLocalProject());
   $('attachImages').addEventListener('click', async () => {
     const owner = composerDraftOwner();
     appendImages(owner, await run(api.chooseFiles()));
   });
-  skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), button: $('composerSkills'), host: $('skillPicker'),
+  skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), host: $('skillPicker'),
     selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${composerDraftGeneration}`,
     scope: () => ({ sessionId: selectedId, projectId: selectedLocalProject()?.id ?? selectedProjectId }),
     draft: () => inputDrafts.get(draftKey()), saveDraft: text => inputDrafts.set(draftKey(), text),
-    list: scope => api.skillLibrary(scope), importFile: kind => api.importSkill(kind),
-    remove: id => api.removeSkill(id), openFolder: () => api.openSkillsFolder() });
+    list: scope => api.skillLibrary(scope), command: name => {
+      if (name === 'plan') { $('createPlan').click(); return; }
+      if (name === 'compact') { $('compactSession').click(); return; }
+      const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
+      automation.dispatchEvent(new Event('change', { bubbles: true }));
+    } });
   skillPicker.restore();
-  $('sidebarSkills').addEventListener('click', () => skillPicker?.open());
   $('generateFinishGoal').addEventListener('click', async () => {
     const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId, turnId = controlledTurnId;
     if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration) return;

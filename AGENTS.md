@@ -391,12 +391,15 @@ guards still apply. This root is not saved in config, does not satisfy connectio
 and never becomes the default or learned project cwd, including native paths through an
 overlapping approved root. Desktop and external plugins receive no managed root.
 
-The composer and sidebar open one searchable Skills library with file/package imports and
-whole-package removal to the OS Trash. Leading `/id` or `/prompt id` completion projects selected
+Skills open only through leading `/` completion in the composer. Commands and Skills are
+separate compact sections; there is no sidebar entry, modal library or native import/remove UI.
+A small plus icon at the bottom inserts `Please add the following skills to my COS skills:`
+into the authored draft without sending it. ChatGPT can create Markdown instructions through
+the existing permission-checked `/skills` filesystem root. Leading `/id` or `/prompt id` completion projects selected
 commands as removable chips. The existing authored draft retains those command bytes; chips and
 the visible task textarea are projections, never a separate selection ledger. Multiple commands
 preserve order and deduplicate; prose/code later in a message is literal. Empty/loading/no-match
-states do not intercept Enter. Draft replacement, navigation and IME composition retire stale choices.
+states do not intercept Enter. Draft replacement, navigation, render generations and IME composition retire stale choices.
 
 `skill-library.ts` discovers repository `.agents/skills`, project `.codex/skills`, standard user,
 Codex, system and admin directories only within current approved roots. No new root authority or
@@ -718,6 +721,24 @@ publication reoffers it. Explicit `write_stdin` can drain the remaining unacknow
 After 120 seconds without attendance, a running process can contribute one owner-scoped
 reminder; reading diagnostic state does not consume it. Blocked/compacting/superseded sources
 and nested code-mode calls do not receive or acknowledge these automatic pages.
+
+### Human workspace terminal
+
+`workspace-terminal.ts` and `workspace-terminal-ipc.ts` own human-operated node-pty shells;
+`renderer/workspace-terminal.ts` renders them with xterm and FitAddon. These shells are separate
+from MCP process custody and never consume agent output. The header button or Ctrl+backtick opens
+a resizable bottom panel. Each new tab captures the selected approved project's canonical cwd;
+changing chats does not retarget existing shells. No project means no guessed cwd. The live
+Command permission gates spawn/input, and input rechecks the original project path.
+
+Up to eight tabs retain interactive shell state. Hiding the panel preserves processes; closing
+a tab, renderer reload/destruction or app shutdown retires them. UUIDs and pending-create tickets
+prevent a late spawn after close. IPC accepts only the current main-frame sender and bounded
+named requests. Output pauses at 256 KiB until xterm parser acknowledgements drain it; scrollback
+is limited to 5,000 lines and queued input to 256 KiB. Ctrl+C interrupts unless copying a selection;
+Ctrl+Shift+C copies. Native terminal escape handling stays in xterm, not HTML rendering.
+`scripts/verify-workspace-terminal.cjs` tests real Electron/PTY input, cwd/environment persistence,
+hide/reopen, tabs, Ctrl+C, exit codes, resize and closing against isolated state.
 
 ### Images
 
@@ -1274,6 +1295,9 @@ while leaving ChatGPT's messages, model execution and account permissions with t
 | `background.js` | MV3 journal and HTTP transport, tab/document registry, command elections and durable ACK custody. |
 | `popup.*`, `overlay.css` | Pair/reconnect status and extension-owned presentation; no local tool authority. |
 
+The popup has no extension-reload action. The temporary debug button, handler and opener
+script are retired; manual extension reload uses the browser's normal extension management.
+
 Content↔MAIN messages need the expected source, type, nonce and navigation epoch. MAIN evidence
 is untrusted data, not instructions or filesystem permission. Prefer bounded observations of
 the current document over repeated full Fiber/DOM scans. Shared selectors belong in the DOM
@@ -1284,7 +1308,8 @@ adapter; do not make each feature guess a different composer or terminal message
 Chrome 125+ grants the companion required `debugger`, `tabs` and HTTP(S) host access. The app
 adds no per-tab approval UI: existing screen/control settings govern observation/input and
 Read-only still masks mutation. Only an explicit `browser_tabs new` creates a tab; listing or
-attaching never activates one. A blue border identifies an attached tab; release removes the
+attaching never activates one. A soft blue edge glow, without a hard border or text badge,
+identifies an attached tab; release removes the
 indicator and debugger without closing the page. Chrome's own permission/debugger UI remains.
 The root debugger session enables Chromium focus emulation while attached, so hidden pages
 continue rendering and accepting input without changing the selected tab or OS foreground.
@@ -1997,6 +2022,10 @@ Current persistence/publication exceptions are in §21.
 
 ## 18. Desktop workspace, plugins, connection and native control
 
+Dark is the default theme. Theme selection belongs in Appearance settings; the main header
+has no light/dark shortcut. Files and worker-panel controls attach to the header independently
+of appearance controls.
+
 ### Renderer and IPC
 
 `renderer/main.ts` owns the shell/setup/settings; `chat.ts` owns sessions, composer and timeline.
@@ -2150,6 +2179,15 @@ access. Main re-resolves current approved roots and rejects traversal, symbolic 
 and project-root mutation. Files and the read-only sub-agent panel share one resizable work slot.
 Directories load one level at a time (500 entries); at most 128 expanded directory watches are
 retained. Collapse, panel hiding, renderer reload/destruction and root removal retire watchers.
+Files uses one action toolbar with Refresh; the outer Files toggle closes the panel. Its shared
+work slot can grow to host width minus 360 px for chat, without a fixed maximum pixel width.
+Unchanged session/directory updates preserve preview DOM and pending code loads. File reads keep
+the previous accepted preview until replacement content is ready; hidden previews stay hidden.
+The horizontal preview separator paints a one-pixel hover line with a three-pixel drag area.
+The tree keeps keyboard focus across refreshes and supports arrow/Home/End navigation with
+Enter to activate. Preview and tree share layout space rather than overlapping; the preview's
+Files toggle temporarily hides the tree for reading. Closing the preview restores it.
+Creating an entry uses the same unsaved-edit guard as changing the selected file.
 
 Text previews/editor input are bounded to 256 KiB; full editable previews retain exact UTF-8,
 BOM and line endings plus a content/file-identity revision. Save stages complete replacement bytes
@@ -2227,7 +2265,14 @@ Separate local listener health, public tunnel reachability, ChatGPT connector co
 browser attachment in both status and diagnosis. Stale connect/disconnect results cannot replace
 a newer endpoint. Secret paths/tokens are not public diagnostics.
 
-The sidebar footer owns global connection controls and the Advanced diagnostics popover.
+The sidebar footer owns global connection controls in a compact popover outside the translucent
+sidebar stacking context. Every opening collapses Advanced and its nested Runtime diagnostics.
+Extension-only Overwrite/Timestamps and the redundant settings link are absent. A red header
+Connect action remains visible while disconnected and disappears only on confirmed connection,
+briefly highlighting the footer status (respecting reduced motion). Setup stays reachable from
+Settings and from Connect when configuration is incomplete. The View menu has its own foreground
+stacking layer; Appearance rows align controls at a shared minimum height and Setup uses a stable
+responsive title/language grid across locales.
 The companion sends a bounded snapshot on the authenticated `/diagnostics` route, outside the
 authority-bearing `/status` response. One pending diagnostic page read is shared; current
 connection/document epochs fence delayed results. The bridge cache is presentation only and

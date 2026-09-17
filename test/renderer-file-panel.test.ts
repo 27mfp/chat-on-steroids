@@ -6,9 +6,12 @@ import type { LocalProject } from '../src/shared/projects.js';
 import type { ProjectDirectoryListing, ProjectFilePreview, ProjectFilesChanged } from '../src/shared/project-files.js';
 
 const createPdfViewer = vi.hoisted(() => vi.fn());
+const codeMount = vi.hoisted(() => ({ wait: null as Promise<void> | null, calls: 0 }));
 vi.mock('../src/renderer/file-pdf-viewer.js', () => ({ createProjectPdfViewer: createPdfViewer }));
 vi.mock('../src/renderer/file-code-editor.js', () => ({
   createProjectCodeEditor: async (options: { parent: HTMLElement; text: string; onChange?: (text: string) => void }) => {
+    codeMount.calls++;
+    if (codeMount.wait) await codeMount.wait;
     const input = document.createElement('textarea'); input.className = 'test-code-input'; input.value = options.text;
     options.parent.append(input);
     input.addEventListener('input', () => options.onChange?.(input.value));
@@ -60,6 +63,7 @@ const submitEntryDialog = async (value: string): Promise<void> => {
 };
 
 beforeEach(() => {
+  codeMount.wait = null; codeMount.calls = 0;
   dom = new JSDOM('<body><section id="host"></section><button id="toggle"></button></body>', { url: 'https://cos.local/' });
   vi.stubGlobal('window', dom.window);
   vi.stubGlobal('document', dom.window.document);
@@ -121,6 +125,62 @@ it('is unavailable without a local project and lazily expands only the chosen di
   expect((window.api.listProjectFiles as any)).toHaveBeenLastCalledWith(projectA.id, 'src');
   expect(host.textContent).toContain('main.ts');
   expect((window.api.watchProjectFiles as any)).toHaveBeenLastCalledWith(projectA.id, ['', 'src']);
+});
+
+it('keeps tree focus through directory loading and supports arrow, parent and boundary navigation', async () => {
+  const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
+  panel.update(projectA); toggle.click(); await tick();
+  const key = async (key: string) => {
+    document.activeElement!.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    await tick();
+  };
+  const focusedPath = () => (document.activeElement as HTMLElement).dataset.path;
+  host.querySelector<HTMLButtonElement>('[data-path="src"]')!.focus();
+  await key('ArrowRight');
+  expect(focusedPath()).toBe('src');
+  await key('ArrowRight'); expect(focusedPath()).toBe('src/main.ts');
+  await key('ArrowLeft'); expect(focusedPath()).toBe('src');
+  await key('ArrowLeft'); expect(focusedPath()).toBe('src');
+  expect(host.querySelector('[data-path="src/main.ts"]')).toBeNull();
+  await key('ArrowDown'); expect(focusedPath()).toBe('README.md');
+  projectFilesChanged?.({ projectId: projectA.id, directory: '' }); await tick();
+  expect(focusedPath()).toBe('README.md');
+  await key('Home'); expect(focusedPath()).toBe('');
+  await key('End'); expect(focusedPath()).toBe('README.md');
+  expect(host.querySelectorAll('[role="treeitem"][tabindex="0"]')).toHaveLength(1);
+  expect(window.api.previewProjectFile).not.toHaveBeenCalled();
+});
+
+it.each(['README.md', 'example.ts'])('preserves unchanged %s preview DOM during session and directory refreshes', async name => {
+  let value = { ...preview, path: name, name };
+  (window.api.listProjectFiles as any) = vi.fn(() => ok({ ...rootListing(), entries: [{ name, path: name, kind: 'file', bytes: 12 }] }));
+  (window.api.previewProjectFile as any) = vi.fn(() => ok({ ...value }));
+  const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
+  panel.update(projectA); toggle.click(); await tick();
+  host.querySelector<HTMLButtonElement>(`[data-path="${name}"]`)!.click(); await tick();
+  const content = host.querySelector('.file-preview-markdown, .file-code-viewer-host')!;
+  const treeRow = host.querySelector(`[data-path="${name}"]`);
+  for (let i = 0; i < 10; i++) panel.update({ ...projectA });
+  await tick();
+  expect(host.querySelector(`[data-path="${name}"]`)).toBe(treeRow);
+  expect(host.querySelector('.file-preview-markdown, .file-code-viewer-host')).toBe(content);
+  projectFilesChanged?.({ projectId: projectA.id, directory: '' }); await tick(); await tick();
+  expect(host.querySelector('.file-preview-markdown, .file-code-viewer-host')).toBe(content);
+  value = { ...value, text: '# changed', revision: 'b'.repeat(64) };
+  projectFilesChanged?.({ projectId: projectA.id, directory: '' }); await tick(); await tick();
+  expect(host.querySelector('.file-preview-markdown, .file-code-viewer-host')).not.toBe(content);
+  expect(host.querySelector('.file-preview')?.textContent || host.querySelector<HTMLTextAreaElement>('.test-code-input')?.value).toBeTruthy();
+});
+
+it('lets the preview occupy the panel and restores the tree when it closes', async () => {
+  const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
+  panel.update(projectA); toggle.click(); await tick();
+  host.querySelector<HTMLButtonElement>('[data-path="README.md"]')!.click(); await tick();
+  host.querySelector<HTMLButtonElement>('.file-preview-toggle-tree')!.click();
+  expect(host.querySelector('.file-panel-body')?.classList.contains('is-reading')).toBe(true);
+  expect(host.querySelector('.file-preview-toggle-tree')?.getAttribute('aria-pressed')).toBe('false');
+  host.querySelector<HTMLButtonElement>('.file-preview-close')!.click(); await tick();
+  expect(host.querySelector('.file-panel-body')?.classList.contains('is-reading')).toBe(false);
 });
 
 it('refreshes a watched directory automatically when the filesystem changes', async () => {
@@ -255,15 +315,18 @@ it('loads an expanded renamed folder under its new path and retires its old chil
   expect(window.api.watchProjectFiles).toHaveBeenLastCalledWith(projectA.id, ['', 'code']);
 });
 
-it('centers tree disclosure and panel close controls with geometry-owned icons', async () => {
+it('keeps one compact toolbar and closes through the Files toggle', async () => {
   const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
   panel.update(projectA); toggle.click(); await tick();
 
   const disclosure = host.querySelector<HTMLElement>('[data-path="src"] .file-tree-disclosure')!;
   expect(disclosure.textContent).toBe('');
   expect(disclosure.getAttribute('aria-hidden')).toBe('true');
-  const close = host.querySelector<HTMLButtonElement>('.file-panel-close')!;
-  expect(close.querySelector('use')?.getAttribute('href')).toBe('#i-x');
+  expect(host.querySelector('.file-panel-header')).toBeNull();
+  expect(host.querySelector('.file-panel-close')).toBeNull();
+  expect(host.querySelector('.file-panel-toolbar .file-panel-refresh')).not.toBeNull();
+  toggle.click(); await tick();
+  expect(host.querySelector<HTMLElement>('.file-panel')!.hidden).toBe(true);
 });
 
 it('renders markdown semantically and strips executable or remote-media markup', async () => {
@@ -595,6 +658,22 @@ function typeEdit(input: HTMLTextAreaElement, text: string): void {
   input.value = text; input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
 }
 
+it.each(['New file', 'New folder'])('protects the active draft before %s changes selection', async label => {
+  const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
+  panel.update(projectA); toggle.click(); await tick();
+  const input = await editFile(); typeEdit(input, 'keep this draft');
+  host.querySelector<HTMLButtonElement>(`[title="${label}"]`)!.click(); await tick();
+  expect(document.querySelector('.file-confirm-dialog')).not.toBeNull();
+  expect(document.querySelector('.file-entry-dialog')).toBeNull();
+  document.querySelector<HTMLButtonElement>('.file-confirm-dialog .btn')!.click(); await tick();
+  expect(host.querySelector<HTMLTextAreaElement>('.test-code-input')?.value).toBe('keep this draft');
+  expect(window.api.createProjectFileEntry).not.toHaveBeenCalled();
+
+  host.querySelector<HTMLButtonElement>(`[title="${label}"]`)!.click(); await tick();
+  document.querySelector<HTMLButtonElement>('.file-confirm-dialog .file-dialog-danger')!.click(); await tick();
+  expect(document.querySelector('.file-entry-dialog')).not.toBeNull();
+});
+
 it('retains an unsaved editor draft through a project A-B-A round trip', async () => {
   const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
   panel.update(projectA); toggle.click(); await tick();
@@ -655,4 +734,48 @@ it('cancels a stale name dialog after a project A-B-A round trip', async () => {
   panel.update(projectB); panel.update(projectA); await tick();
   await submitEntryDialog('stale.txt');
   expect(window.api.createProjectFileEntry).not.toHaveBeenCalled();
+});
+
+it('expands the work panel beyond 60 percent while retaining space for chat', () => {
+  host.getBoundingClientRect = () => ({ width: 2200 } as DOMRect);
+  createFilePanel({ host, toggle, onAttach: () => undefined });
+  const handle = host.querySelector<HTMLElement>('.work-panel-resize')!;
+  handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'End' }));
+  expect(host.style.getPropertyValue('--work-panel-width')).toBe('1840px');
+  expect(Number(handle.getAttribute('aria-valuenow'))).toBeGreaterThan(2200 * .6);
+  host.getBoundingClientRect = () => ({ width: 1000 } as DOMRect);
+  dom.window.dispatchEvent(new dom.window.Event('resize'));
+  expect(host.style.getPropertyValue('--work-panel-width')).toBe('640px');
+});
+
+it('keeps the previous preview during a pending file read and ignores a superseded read', async () => {
+  const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
+  panel.update(projectA); toggle.click(); await tick();
+  const row = host.querySelector<HTMLButtonElement>('[data-path="README.md"]')!;
+  row.click(); await tick();
+  const surface = host.querySelector('.file-preview-markdown');
+  let complete!: (value: any) => void;
+  window.api.previewProjectFile = vi.fn(() => new Promise<{ ok: true; data: ProjectFilePreview }>(resolve => { complete = resolve; }));
+  row.click(); await tick();
+  expect(host.querySelector('.file-preview-markdown')).toBe(surface);
+  expect(host.textContent).not.toContain('Loading preview');
+  host.querySelector<HTMLButtonElement>('[data-path="src"]')!.click(); await tick();
+  complete({ ok: true, data: { ...preview, text: '# stale' } }); await tick();
+  expect(host.querySelector<HTMLElement>('.file-preview')!.hidden).toBe(true);
+});
+
+
+it('does not restart a pending code mount when the directory watcher refreshes', async () => {
+  const code = { ...preview, path: 'README.md', name: 'example.ts', text: 'const answer = 42;' };
+  window.api.previewProjectFile = vi.fn(() => ok(code));
+  let release!: () => void;
+  codeMount.wait = new Promise<void>(resolve => { release = resolve; });
+  const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
+  panel.update(projectA); toggle.click(); await tick();
+  host.querySelector<HTMLButtonElement>('[data-path="README.md"]')!.click(); await tick();
+  expect(codeMount.calls).toBe(1);
+  projectFilesChanged?.({ projectId: projectA.id, directory: '' } as ProjectFilesChanged); await tick();
+  expect(codeMount.calls).toBe(1);
+  release(); await tick();
+  expect(host.querySelector<HTMLTextAreaElement>('.test-code-input')?.value).toBe(code.text);
 });

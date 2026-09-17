@@ -1319,5 +1319,22 @@
   "Preferences": "Preferencias",
   "Theme": "Tema",
   "Light": "Claro",
-  "Dark": "Oscuro"
+  "Dark": "Oscuro",
+  "Commands": "Comandos",
+  "Compact": "Compactar",
+  "Add Skills": "Añadir Skills",
+  "Turn the next composer request into editable stages.": "Convierte la próxima solicitud en etapas editables.",
+  "Pursue a saved objective and stop when it is complete.": "Persigue un objetivo guardado y detente al completarlo.",
+  "Keep continuing toward the saved objective.": "Sigue trabajando hacia el objetivo guardado.",
+  "Compact this chat and resume it in a fresh conversation.": "Compacta este chat y continúa en una conversación nueva.",
+  "Terminal": "Terminal",
+  "Toggle terminal": "Mostrar u ocultar terminal",
+  "Toggle terminal (Ctrl+`)": "Mostrar u ocultar terminal (Ctrl+`)",
+  "New terminal": "Nuevo terminal",
+  "Hide terminal": "Ocultar terminal",
+  "Close terminal": "Cerrar terminal",
+  "Terminal height": "Altura del terminal",
+  "Open a terminal in this project": "Abrir un terminal en este proyecto",
+  "Select a project to open a terminal": "Selecciona un proyecto para abrir un terminal",
+  "Terminal input is busy. Try a smaller paste.": "La entrada del terminal está ocupada. Intenta pegar menos texto."
 }
