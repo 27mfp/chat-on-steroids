@@ -7,7 +7,8 @@ import type { InputAttachment } from '../shared/input.js';
 import type { UsageOverview } from '../shared/usage.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
-import type { SkillSummary } from '../shared/skills.js';
+import type { ProjectDirectoryListing, ProjectFileMutationResult, ProjectFilePreview, ProjectFileSaveResult, ProjectFilesChanged } from '../shared/project-files.js';
+import type { SkillSummary, SkillLibrary, SkillsDraftScope } from '../shared/skills.js';
 import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '../shared/plugins.js';
 /**
  * The entire renderer-facing API.
@@ -18,7 +19,7 @@ import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '..
  */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { AppState, Capabilities, Config, Diagnosis, LogEntry } from '../shared/types.js';
+import type { AppState, Capabilities, CompanionDiagnostics, Config, Diagnosis, LogEntry } from '../shared/types.js';
 import type {
   Handoff,
   ImageStorageClearMode,
@@ -99,7 +100,10 @@ const api = {
   },
   chooseFiles: () => call<InputAttachment[]>('sessions:files'),
   listSkills: () => call<SkillSummary[]>('skills:list'),
-  importSkill: () => call<SkillSummary | null>('skills:import'),
+  skillLibrary: (scope: SkillsDraftScope) => call<SkillLibrary>('skills:library', scope),
+  importSkill: (kind: 'file' | 'package' = 'file') => call<SkillSummary | null>('skills:import', { kind }),
+  removeSkill: (id: string) => call<boolean>('skills:remove', { id }),
+  openSkillsFolder: () => call<void>('skills:openFolder'),
   dropFiles: async (files: File[]): Promise<Reply<InputAttachment[]>> => {
     if (!files.length || files.length > 20) return { ok: false, error: 'Attach up to 20 files per message' };
     try {
@@ -152,16 +156,33 @@ const api = {
   listProjects: () => call<LocalProject[]>('projects:list'),
   addProject: () => call<LocalProject | null>('projects:add'),
   removeProject: (id: string) => call<LocalProject>('projects:remove', { id }),
+  listProjectFiles: (projectId: string, directory = '') => call<ProjectDirectoryListing>('projectFiles:list', { projectId, directory }),
+  watchProjectFiles: (projectId: string | null, directories: string[]) => call<boolean>('projectFiles:watch', { projectId, directories }),
+  onProjectFilesChanged: (listener: (event: ProjectFilesChanged) => void): (() => void) => {
+    const wrapped = (_event: unknown, change: ProjectFilesChanged): void => listener(change);
+    ipcRenderer.on('projectFiles:changed', wrapped);
+    return () => ipcRenderer.removeListener('projectFiles:changed', wrapped);
+  },
+  previewProjectFile: (projectId: string, path: string) => call<ProjectFilePreview>('projectFiles:preview', { projectId, path }),
+  createProjectFileEntry: (projectId: string, directory: string, name: string, kind: 'file' | 'directory') =>
+    call<ProjectFileMutationResult>('projectFiles:create', { projectId, directory, name, kind }),
+  renameProjectFileEntry: (projectId: string, path: string, name: string) => call<ProjectFileMutationResult>('projectFiles:rename', { projectId, path, name }),
+  saveProjectFile: (projectId: string, path: string, text: string, expectedModifiedAt: string, expectedBytes: number, expectedRevision: string) =>
+    call<ProjectFileSaveResult>('projectFiles:save', { projectId, path, text, expectedModifiedAt, expectedBytes, expectedRevision }),
+  deleteProjectFileEntry: (projectId: string, path: string) => call<boolean>('projectFiles:delete', { projectId, path }),
+  revealProjectFileEntry: (projectId: string, path = '') => call<boolean>('projectFiles:reveal', { projectId, path }),
+  attachProjectFile: (projectId: string, path: string) => call<InputAttachment>('projectFiles:attach', { projectId, path }),
   getSessionImage: (id: string, assetId: string) => call<string | null>('sessions:image', { id, assetId }),
   getImageStorage: () => call<ImageStorageInfo>('sessions:imageStorage'),
   clearImageStorage: (mode: ImageStorageClearMode) => call<ImageStorageClearResult>('sessions:clearImageStorage', { mode }),
-  getSession: (id: string, options?: { from?: number; before?: number; limit?: number }) =>
+    getSession: (id: string, options?: { from?: number; before?: number; after?: number; limit?: number }) =>
     call<SessionDetail>('sessions:events', { id, ...options }),
   stopSessionTurn: (id: string, expectedTurnId: string) => call<SessionControlsView>('sessions:stopTurn', { id, expectedTurnId }),
   releaseSessionFinish: (id: string, expectedTurnId: string) => call<SessionControlsView>('sessions:releaseFinish', { id, expectedTurnId }),
   generateFinishGoal: (id: string, expectedTurnId: string) => call<string>('sessions:generateFinishGoal', { id, expectedTurnId }),
   getChatModels: () => call<ChatModelCatalog>('chatModels:get'),
   browserPreferences: (patch: Partial<BrowserPreferences> = {}) => call<BrowserPreferences>('browser:preferences', patch),
+  companionDiagnostics: () => call<CompanionDiagnostics | null>('bridge:diagnostics'),
   requestChatModels: () => call<ChatModelCatalog>('chatModels:request'),
   onToolApprovalNotice: (listener: () => void): (() => void) => {
     const wrapped = (): void => listener();

@@ -1,27 +1,37 @@
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { invokedSkills } from '../src/shared/skill-invocation.js';
+import type { LibrarySkill, SkillLibrary } from '../src/shared/skills.js';
 
 let dom: JSDOM;
 beforeEach(() => {
   vi.resetModules();
-  dom = new JSDOM('<textarea id="input"></textarea><button id="skills">Skills</button><div id="picker" hidden></div>', { url: 'https://local.test' });
+  dom = new JSDOM('<textarea id="input"></textarea><button id="skills">Skills</button><div id="picker" hidden></div><div id="selected" hidden></div>', { url: 'https://local.test' });
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, Event: dom.window.Event, Node: dom.window.Node });
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
 });
 afterEach(() => dom.window.close());
-const skill = { id: 'review', name: 'Review', description: 'Check changes', path: '/skills/review/SKILL.md' };
+const skill: LibrarySkill = { id: 'review', name: 'Review', description: 'Check changes', path: '/skills/review/SKILL.md', managed: true, scope: 'managed', source: 'managed', allowImplicitInvocation: true };
+const library = (skills = [skill]): SkillLibrary => ({ skills, errors: [], roots: [], includeInstructions: true });
 async function fixture() {
   const { initSkills } = await import('../src/renderer/skills.js');
   const input = document.getElementById('input') as HTMLTextAreaElement;
   const button = document.getElementById('skills')!;
   const host = document.getElementById('picker')!;
   let owner = 'a:1';
-  const list = vi.fn(async () => ({ ok: true as const, data: [skill] }));
+  const drafts = new Map<string, string>();
+  const key = () => owner.split(':')[0]!;
+  const list = vi.fn(async () => ({ ok: true as const, data: library() }));
   const importFile = vi.fn(async () => ({ ok: true as const, data: skill }));
-  const picker = initSkills({ input, button, host, owner: () => owner, list, importFile });
+  const picker = initSkills({ input, button, host, selectedHost: document.getElementById('selected')!, owner: () => owner,
+    scope: () => ({ sessionId: key() }), draft: () => drafts.get(key()), saveDraft: text => drafts.set(key(), text), list, importFile,
+    remove: vi.fn(async () => ({ ok: true as const, data: true })), openFolder: vi.fn(async () => ({ ok: true as const, data: undefined })) });
   const type = (value: string) => { input.value = value; input.setSelectionRange(value.length, value.length); input.dispatchEvent(new Event('input')); };
-  const key = (value: string) => picker.keydown(new dom.window.KeyboardEvent('keydown', { key: value, cancelable: true }));
-  return { input, button, host, list, importFile, picker, type, key, owner: (value: string) => { owner = value; } };
+  const press = (value: string) => picker.keydown(new dom.window.KeyboardEvent('keydown', { key: value, cancelable: true }));
+  const replace = (value: string) => { drafts.set(key(), value); input.value = value; picker.restore(); };
+  return { input, button, host, list, importFile, picker, type, key: press, replace,
+    owner: (value: string) => { owner = value; input.value = drafts.get(key()) ?? ''; picker.restore(); } };
 }
 const settle = async () => { await new Promise(resolve => setTimeout(resolve, 0)); };
 
@@ -33,24 +43,27 @@ it('parses only leading commands, supports /prompt, and deduplicates without con
   expect(() => invokedSkills('/prompt')).toThrow(/Choose/);
 });
 
-it('offers /prompt completion and preserves earlier selection and complete task', async () => {
+it('projects /prompt completion into chips while preserving the existing authored draft', async () => {
   const f = await fixture();
   f.type('/audit\n/prompt re'); await settle();
   expect(f.host.hidden).toBe(false);
   expect(f.key('Enter')).toBe(true);
-  expect(f.input.value).toBe('/audit\n/review ');
-  f.type('/audit\nTask must stay exactly here');
+  expect(f.input.value).toBe('');
+  expect(invokedSkills(f.picker.authoredText())).toEqual(['audit', 'review']);
+  expect(document.querySelectorAll('.composer-selected-skill')).toHaveLength(2);
+  f.replace('/audit\nTask must stay exactly here');
   f.button.click(); await settle();
-  (f.host.querySelector('.skill-choice') as HTMLButtonElement).click();
-  expect(f.input.value).toBe('/review\n/audit\nTask must stay exactly here');
+  (document.querySelector('.skill-use') as HTMLButtonElement).click();
+  expect(f.input.value).toBe('Task must stay exactly here');
+  expect(f.picker.authoredText()).toBe('/audit\n/review\nTask must stay exactly here');
 });
 
 it('never traps Enter when loading, empty or unmatched and does not refetch on each character', async () => {
   const f = await fixture();
-  let resolve!: (value: { ok: true; data: typeof skill[] }) => void;
+  let resolve!: (value: { ok: true; data: SkillLibrary }) => void;
   f.list.mockImplementation(() => new Promise(done => { resolve = done; }));
   f.type('/'); expect(f.key('Enter')).toBe(false);
-  resolve({ ok: true, data: [] }); await settle();
+  resolve({ ok: true, data: library([]) }); await settle();
   f.type('/z'); expect(f.key('Enter')).toBe(false);
   f.type('/zz'); expect(f.key('Enter')).toBe(false);
   expect(f.list).toHaveBeenCalledTimes(1);
@@ -76,12 +89,41 @@ it('rejects pending import across A→B→A draft epochs and Escape closes butto
   let resolve!: (value: { ok: true; data: typeof skill }) => void;
   f.importFile.mockImplementation(() => new Promise(done => { resolve = done; }));
   f.type('Original task'); f.button.click(); await settle();
-  (f.host.querySelector('.skill-import') as HTMLButtonElement).click();
+  document.getElementById('skillsImport')!.click();
   f.owner('b:2'); f.picker.close(); f.owner('a:3');
   resolve({ ok: true, data: skill }); await settle();
   expect(f.input.value).toBe('Original task');
   f.button.click(); await settle();
-  const button = f.host.querySelector('button')!; button.focus();
+  const button = document.querySelector<HTMLButtonElement>('.skill-use')!; button.focus();
   button.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  expect(f.host.hidden).toBe(true);
+  expect((document.getElementById('skillsDialog') as HTMLDialogElement).open).toBe(false);
+});
+
+it('keeps chips in the existing per-chat draft through A to B to A and removes only the chosen directive', async () => {
+  const f = await fixture();
+  f.replace('/review\n/audit\nKeep my task exactly.\nProse /review stays literal.');
+  f.owner('b:2'); f.type('Other chat');
+  f.owner('a:3');
+  expect(document.querySelectorAll('.composer-selected-skill')).toHaveLength(2);
+  expect(f.input.value).toBe('Keep my task exactly.\nProse /review stays literal.');
+  document.querySelector<HTMLButtonElement>('[data-skill-id="review"] .composer-selected-skill-remove')!.click();
+  expect(f.picker.authoredText()).toBe('/audit\nKeep my task exactly.\nProse /review stays literal.');
+  f.owner('b:4'); expect(f.picker.authoredText()).toBe('Other chat');
+});
+
+it('shows a failed library load with retry controls and ignores the old scope result', async () => {
+  const f = await fixture();
+  f.list.mockRejectedValueOnce(new Error('Disk is unavailable'));
+  f.button.click(); await settle();
+  expect(document.getElementById('skillsStatus')!.textContent).toContain('Disk is unavailable');
+  expect(document.getElementById('skillsList')!.textContent).toContain('could not be loaded');
+  document.getElementById('skillsRefresh')!.click(); await settle();
+  expect(document.querySelector('.skill-use')).not.toBeNull();
+  f.picker.close();
+  let resolve!: (value: { ok: true; data: SkillLibrary }) => void;
+  f.list.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  f.button.click(); f.owner('b:2'); f.type('B draft');
+  resolve({ ok: true, data: library() }); await settle();
+  expect(f.picker.authoredText()).toBe('B draft');
+  expect((document.getElementById('skillsDialog') as HTMLDialogElement).open).toBe(false);
 });
