@@ -1934,7 +1934,20 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
       await elect(input.id, { tab: tab.id, stage: 'ready', conversationId: target });
       elected = elections[input.id];
     }
-    if (elected?.tab != null) tab = candidates.find(candidate => candidate.id === elected.tab);
+    if (elected?.tab != null) {
+      tab = candidates.find(candidate => candidate.id === elected.tab);
+      // ChatGPT's SPA strips the cos-input marker after hydration, leaving the
+      // elected live tab invisible to matchesInput and deadlocking delivery.
+      // The persisted election is itself custody proof: a ready election already
+      // passed preparation, so keep the same tab while it cannot already be
+      // hosting a different concrete conversation. Preparing elections still
+      // need the exact idle proof below, not this fallback.
+      if (!tab && elected.stage === 'ready') {
+        const candidate = tabs.find(row => row.id === elected.tab);
+        const hosted = conversationFromUrl(candidate?.url) || conversationFromUrl(candidate?.pendingUrl);
+        if (candidate && (!hosted || hosted === target)) tab = candidate;
+      }
+    }
     // A prepare receipt can be lost after its exact document changes nothing. Do
     // not replay from elapsed time: only the still-elected, still-owned document
     // can prove that it is idle again and therefore no old preparation is live.
@@ -3077,7 +3090,9 @@ const HANDLERS = {
       if (message.lifetime === 'temporary-planner' && (owner !== `${prefix}${source.navigationEpoch}` ||
           new URL(tab.url).searchParams.get('temporary-chat') !== 'true')) return { ok: false };
     } else {
-      if (!conversationId && !String(tab.url || '').includes(`cos-input=${id}`)) return { ok: false };
+      // ChatGPT's SPA strips the cos-input marker after hydration; the elected
+      // tab recorded by this worker is at least as strong a custody proof.
+      if (!conversationId && !String(tab.url || '').includes(`cos-input=${id}`) && inputOpenings[id]?.tab !== source.tab) return { ok: false };
       if (message.conversationId !== conversationId || !ownsDocument(source)) return { ok: false };
     }
     if (message.ack === true && message.lifetime !== 'temporary-planner') {
