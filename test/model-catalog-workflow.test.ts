@@ -29,7 +29,7 @@ it('defers desktop delivery while catalog inspection owns the provider picker', 
   expect(await (context.accept as Function)({ conversationId: 'existing-chat' })).toBe(false);
   expect(context.desktopInputBusy).toBe(false);
 });
-const section = source.slice(source.indexOf('  function catalogPageReady('), source.indexOf('  /** Popup commands target this tab'));
+const section = source.slice(source.indexOf('  function composerDraft('), source.indexOf('  /** Popup commands target this tab'));
 const nonce = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 it.each([false, true])('holds cold discovery until composer hydration without a maintenance poll (navigation=%s)', async navigated => {
   const dom = new JSDOM('<html><body></body></html>');

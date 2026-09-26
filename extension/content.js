@@ -815,10 +815,12 @@
     // Only the explicitly selected offline Goal backend changes the user prompt.
     const composer = CLF_DOM.composer();
     if (goalConfig?.backend === 'templates' && (goalConfig?.enabled === true || (!goalConfig?.own && !!goalConfig?.objective)) && goalConfig?.mode !== 'loop' && !desktopDecision) {
-      const raw = composer?.innerText || composer?.textContent || '';
+      const raw = composer?.tagName === 'TEXTAREA' || composer?.tagName === 'INPUT'
+        ? composerDraft(composer)
+        : (composer?.innerText || composer?.textContent || '');
       if (raw.trim() && !raw.includes(GOAL_MARKER_INSTRUCTION.trim())) CLF_DOM.insertPrompt(raw + GOAL_MARKER_INSTRUCTION, true);
     }
-    const text = sendText(CLF_DOM.composer()?.textContent);
+    const text = sendText(composerDraft());
     const attachmentNames = CLF_DOM.composerAttachmentNames();
     if (!text && !attachmentNames.length) return;
     let previousMessageId = null;
@@ -7440,15 +7442,15 @@
       return;
     }
     setGoalPhase('sending');
-    const previousComposer = CLF_DOM.composer()?.textContent || '';
+    const previousComposer = composerDraft();
     if (!CLF_DOM.insertPrompt(opening, true)) {
       setGoalPhase('sending', 'ChatGPT would not replace the New Chat draft');
       return;
     }
-    const preparedOpening = CLF_DOM.composer()?.textContent || '';
+    const preparedOpening = composerDraft();
     await sleep(200);
     if (!current()) {
-      if (alive && epoch === openingEpoch && CLF_DOM.composer()?.textContent === preparedOpening)
+      if (alive && epoch === openingEpoch && composerDraft() === preparedOpening)
         CLF_DOM.insertPrompt(previousComposer, true);
       return;
     }
@@ -8824,10 +8826,10 @@
       }
       const existing = CLF_DOM.composer();
       const occupiedByOtherDraft =
-        Boolean(existing && (existing.textContent || '').trim()) &&
-        squeeze(existing?.textContent) !== squeeze(prompt);
+        Boolean(existing && composerDraft(existing).trim()) &&
+        squeeze(composerDraft(existing)) !== squeeze(prompt);
       let insertionFailure = '';
-      if (squeeze(existing?.textContent) !== squeeze(prompt) && !CLF_DOM.insertPrompt(prompt, false, reason => { insertionFailure = reason; })) {
+      if (squeeze(composerDraft(existing)) !== squeeze(prompt) && !CLF_DOM.insertPrompt(prompt, false, reason => { insertionFailure = reason; })) {
         return void (await abandonBeforeSend(
           occupiedByOtherDraft
             ? 'A draft is already in ChatGPT; clear the message box before requesting the handoff.'
@@ -8847,7 +8849,7 @@
         return void (await abandonBeforeSend('The chat changed while preparing the handoff. Nothing was sent.', true));
       }
       const composer = CLF_DOM.composer();
-      if (!composer || squeeze(composer.textContent) !== squeeze(prompt)) {
+      if (!composer || squeeze(composerDraft(composer)) !== squeeze(prompt)) {
         return void (await abandonBeforeSend(
           'The message box changed before the handoff instruction could be sent. Its draft was preserved; nothing was compacted.'
         ));
@@ -8866,7 +8868,7 @@
         renderControl();
         return;
       }
-      if (!sameSource() || CLF_DOM.composer() !== composer || squeeze(composer.textContent) !== squeeze(prompt)) {
+      if (!sameSource() || CLF_DOM.composer() !== composer || squeeze(composerDraft(composer)) !== squeeze(prompt)) {
         CLF_DOM.clearPromptExact(prompt);
         return void (await abandonBeforeSend('The message box changed before the handoff could be sent. Its draft was preserved.', true));
       }
@@ -9352,7 +9354,7 @@
         turnProgressRevision === revision && goalConfig?.pending?.replyId === pending.replyId &&
         goalConfig?.pending?.acceptedAt === pending.acceptedAt && goalUsable() &&
         !stopRequestedAt && pendingTools === 0 && !nativeBusy && !job?.busy &&
-        CLF_DOM.composerVisible() && !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments() &&
+        CLF_DOM.composerVisible() && !composerDraft().trim() && !CLF_DOM.hasComposerAttachments() &&
         !CLF_DOM.errors().some(error => error.blocking === true);
       void (async () => {
         if (!safe() || !await confirmedProviderTerminal(true) || !safe()) return;
@@ -9667,7 +9669,7 @@
       return;
     }
     goalBusy = true;
-    const composerBefore = CLF_DOM.composer()?.textContent || '';
+    const composerBefore = composerDraft();
     let preparedDraft = null, sendAttempted = false, workResumed = false;
     try {
       if (goalTypingSince === 0) goalTypingSince = Date.now();
@@ -9686,7 +9688,7 @@
       }
       // Reuse the same exact editor/draft lease as desktop delivery. Cancellation
       // must not restore text into a replacement editor or a user's intervening edit.
-      preparedDraft = CLF_DOM.captureComposerDraft(CLF_DOM.composer()?.textContent || '', onDocument);
+      preparedDraft = CLF_DOM.captureComposerDraft(composerDraft(), onDocument);
       await sleep(200);
       const current = () => onDocument() && goalUsable() &&
         (sendAttempted || (((goalConfig?.afterTurn !== true && !goalConfig?.pending?.silenceSourceTurnId) || turnProgressRevision === workRevision) &&
@@ -10420,25 +10422,25 @@
     // approve user text appended after focus moved into this tab.
     const squeeze = (value) => (value || '').replace(/\s+/g, '');
     const expectedText = squeeze(boot.text);
-    if (!composer || squeeze(composer.textContent) !== expectedText) {
+    if (!composer || squeeze(composerDraft(composer)) !== expectedText) {
       return void (await fail('ChatGPT replaced the composer while inserting the bootstrap'));
     }
     // The browser opener can focus this fresh tab while the user is typing elsewhere. The
     // point-in-time empty check above is not enough: any edit after insertion must preserve
     // the user's draft and abort, never submit a bootstrap/user-text mixture as a worker task.
     composer = CLF_DOM.composer();
-    if (!composer || squeeze(composer.textContent) !== expectedText) {
+    if (!composer || squeeze(composerDraft(composer)) !== expectedText) {
       return void (await fail('the composer changed before bootstrap send; the draft was preserved'));
     }
     if (await failIfRetargeted()) return;
     const resumeMarker = boot.type === 'resume' ? String(boot.text || '').match(CONTINUATION_MARKER) : null;
     // The last custody writes await HTTP. They cannot preserve the composer or SPA route
     // that was checked above; prove both again after each write and at the native click.
-    const exactBootstrapDraft = () => squeeze(CLF_DOM.composer()?.textContent) === expectedText;
+    const exactBootstrapDraft = () => squeeze(composerDraft()) === expectedText;
     const rejectChangedBootstrap = async () => {
       if (await failIfRetargeted()) return true;
       if (exactBootstrapDraft()) return false;
-      if (boot.type === 'resume' && !squeeze(CLF_DOM.composer()?.textContent)) {
+      if (boot.type === 'resume' && !squeeze(composerDraft())) {
         continuationJournalPending = false;
         await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationLost: true });
         return true;
@@ -10872,7 +10874,7 @@
     if (message.draftOnly === true) {
       const questionId = CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id ?? null;
       return { safe: current() && !desktopInputBusy &&
-        !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments() &&
+        !composerDraft().trim() && !CLF_DOM.hasComposerAttachments() &&
         (!message.expected || message.expected.questionId === questionId),
         revision: turnProgressRevision, turnId, questionId };
     }
@@ -10883,7 +10885,7 @@
     const questionId = CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id ?? null;
     const expected = message.expected;
     return { safe: current() && !stopRequestedAt && pendingTools === 0 && !desktopInputBusy && !nativeBusy && !job?.busy &&
-      !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments() &&
+      !composerDraft().trim() && !CLF_DOM.hasComposerAttachments() &&
       (!expected || (expected.turnId === turnId && expected.questionId === questionId &&
         expected.revision === turnProgressRevision)),
       revision: turnProgressRevision, turnId, questionId };
@@ -10915,7 +10917,7 @@
         let input = null;
         try {
           const safe = () => onTarget() && !stopRequestedAt && pendingTools === 0 &&
-            CLF_DOM.composerVisible() && !(CLF_DOM.composer()?.textContent || '').trim() &&
+            CLF_DOM.composerVisible() && !composerDraft().trim() &&
             !CLF_DOM.hasComposerAttachments() && !CLF_DOM.errors().some(error => error.blocking === true);
           if (!safe()) return false;
           // Flush newly visible native progress before requesting destructive
@@ -10983,7 +10985,7 @@
       // This exact claimed bootstrap owns replacement text; existing chats and
       // attachment drafts remain protected. Re-evaluate after model selection,
       // since React can hydrate that autosaved text while the picker is open.
-      if ((!ownsFreshPage() && (composer.textContent || '').trim()) || CLF_DOM.hasComposerAttachments()) return fail('ChatGPT already contains an unsent draft. Send or clear that draft in Chrome before trying again.');
+      if ((!ownsFreshPage() && composerDraft(composer).trim()) || CLF_DOM.hasComposerAttachments()) return fail('ChatGPT already contains an unsent draft. Send or clear that draft in Chrome before trying again.');
       if (message.directTurn) {
         // The offer only wakes this document. The just-committed outbox claim
         // authorizes interrupting this exact tool-free turn, like handoff's Stop
@@ -11012,7 +11014,7 @@
       // Native picker closure can precede re-enabling the same editor. Wait before
       // its one insertion; a disabled editing host is not a rejected helper prompt.
       if (!await waitPageView(writableComposer, () => onTarget() && !CLF_DOM.generating(), 15000)) return fail('The ChatGPT editor did not become writable before sending.');
-      if (!onTarget() || CLF_DOM.generating() || (!ownsFreshPage() && (CLF_DOM.composer()?.textContent || '').trim()) || CLF_DOM.hasComposerAttachments()) return fail('The ChatGPT composer changed before sending');
+      if (!onTarget() || CLF_DOM.generating() || (!ownsFreshPage() && composerDraft().trim()) || CLF_DOM.hasComposerAttachments()) return fail('The ChatGPT composer changed before sending');
       let insertionFailure = '';
       if (!CLF_DOM.insertPrompt(input.text, ownsFreshPage(), reason => { insertionFailure = reason; }))
         return fail(`ChatGPT did not accept the text${insertionFailure ? ` (${insertionFailure})` : ''}`);
@@ -11034,10 +11036,10 @@
       }
       if (!(await CLF_DOM.uploadImages(input.images, onTarget, draft, files))) return fail('Attachment upload was not confirmed. Check the unsent draft and any file error in ChatGPT before trying again.');
       await Promise.resolve();
-      if (!onTarget() || !draft.current() || sendText(CLF_DOM.composer()?.textContent) !== sendText(input.text)) return fail('The composer changed; your draft was preserved');
+      if (!onTarget() || !draft.current() || sendText(composerDraft()) !== sendText(input.text)) return fail('The composer changed; your draft was preserved');
       const previousUserId = CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id;
       rememberUserSend();
-      const submittedText = sendText(CLF_DOM.composer()?.textContent);
+      const submittedText = sendText(composerDraft());
       if (input.purpose === 'decision') {
         decision = { id: input.id, owner: input.owner, messageId: null, text: input.text, temporary, onTarget: sendingTarget, conversationId: null, epoch: forEpoch, response: '', publishing: false };
         desktopDecision = decision;
@@ -11207,7 +11209,7 @@
     return alive && !generating && !CLF_DOM.generating() && pendingTools === 0 && !desktopInputBusy &&
       !modelCatalogBusy && !pluginRefreshBusy && !desktopDecision && !commandAttempt && !commandJournalGate &&
       queue.length === 0 && !flushWork && CLF_DOM.composerVisible() && !CLF_DOM.hasComposerAttachments() &&
-      !(CLF_DOM.composer()?.textContent || '').trim() &&
+      !composerDraft().trim() &&
       (home ? !rows.length && !marker.has('cos-input') && !marker.has('temporary-chat') :
         !!CLF_DOM.conversationId() && rows.at(-1)?.role === 'assistant');
   }
@@ -11221,7 +11223,7 @@
     const current = () => alive && !interrupted && epoch >= startEpoch && epoch <= startEpoch + (startConversation ? 1 : 0) &&
       (!CLF_DOM.conversationId() || CLF_DOM.conversationId() === startConversation) &&
       !generating && !CLF_DOM.generating() && pendingTools === 0 &&
-      !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments();
+      !composerDraft().trim() && !CLF_DOM.hasComposerAttachments();
     const failure = () => ({ ready: false, fallback: current(), preSend: true, url: location.href });
     desktopInputBusy = true;
     try {
@@ -11249,6 +11251,14 @@
       document.removeEventListener('keydown', interrupt, true);
     }
   }
+  /** Draft sitting in the composer. A textarea exposes it on value, not textContent. */
+  function composerDraft(node) {
+    const box = arguments.length ? node : CLF_DOM.composer();
+    if (!box) return '';
+    if (typeof CLF_DOM.composerText === 'function') return CLF_DOM.composerText(box);
+    return box.textContent || '';
+  }
+
   function catalogPageReady() {
     // A catalog covers every native version, not just the selected group's buckets.
     // Elect an idle composer before inspecting those groups and restoring selection.
@@ -11261,7 +11271,7 @@
     if (!CLF_DOM.composer()) return 'composer_missing';
     if (!CLF_DOM.composerVisible()) return 'composer_hidden';
     if (CLF_DOM.hasComposerAttachments()) return 'attachments';
-    if (CLF_DOM.composer().textContent?.trim()) return 'draft';
+    if (composerDraft().trim()) return 'draft';
     return null;
   }
   function catalogHelper() {
@@ -11285,16 +11295,16 @@
     // Work swaps the composer as well as its picker. Complete that owned transition
     // before binding the exact Chat composer used by the remaining inspection.
     const switchCurrent = () => current() && !generating && !CLF_DOM.generating() && !desktopInputBusy &&
-      !CLF_DOM.hasComposerAttachments() && !CLF_DOM.composer()?.textContent?.trim();
+      !CLF_DOM.hasComposerAttachments() && !composerDraft().trim();
     if (!await CLF_DOM.prepareChatModelSurface(switchCurrent) || !switchCurrent()) {
       if (switchCurrent()) await ask({ type: 'model_catalog', nonce: message.nonce, models: null, error: 'picker_unavailable' });
       return false;
     }
     if (!CLF_DOM.composer()) await waitPageView(catalogPageReady, switchCurrent, 5000);
-    const composer = CLF_DOM.composer(), draftText = composer?.textContent;
+    const composer = CLF_DOM.composer(), draftText = composer ? composerDraft(composer) : undefined;
     const attachments = CLF_DOM.hasComposerAttachments();
     const onTarget = () => current() && catalogPageReady() &&
-      CLF_DOM.composer() === composer && composer.textContent === draftText && CLF_DOM.hasComposerAttachments() === attachments;
+      CLF_DOM.composer() === composer && composerDraft(composer) === draftText && CLF_DOM.hasComposerAttachments() === attachments;
     if (!onTarget()) return false;
       let error;
       const models = await CLF_DOM.inspectModelSettings(() => onTarget() && Date.now() < message.expiresAt, reason => { error ??= reason; }).catch(() => { error ??= 'inspection_failed'; return null; });
@@ -11402,13 +11412,15 @@
           // A terminal probe may capture a newer final revision. Persist it before
           // authorizing closure; the final answer must survive the document.
           if (terminal) { await flush(); observe(); }
+          const box = CLF_DOM.composer();
+          const draftText = !box ? '' : typeof CLF_DOM.composerText === 'function' ? CLF_DOM.composerText(box) : (box.textContent || '');
           sendResponse({ conversationId: CLF_DOM.conversationId(), navigationEpoch: epoch,
             safe: alive && epoch === observedEpoch && message.conversationId === conversationId && CLF_DOM.conversationId() === conversationId &&
               !generating && pendingTools === 0 && (!CLF_DOM.generating() ||
                 (terminal && expectedTerminal === fiberTerminalMessageId && fiberTurnFor(currentAssistantTurn())?.endMessageId === expectedTerminal)) && !desktopInputBusy && !modelCatalogBusy && !pluginRefreshBusy && !desktopDecision &&
               ((!commandAttempt && !commandJournalGate) || failedBootstrap) && (!message.failedCommand || failedBootstrap) &&
               queue.length === 0 && !flushWork && !!CLF_DOM.composer() &&
-              !(CLF_DOM.composer().textContent || '').trim() && !CLF_DOM.hasComposerAttachments() });
+              !draftText.trim() && !CLF_DOM.hasComposerAttachments() });
         })().catch(() => sendResponse({ safe: false }));
         return true;
       }
@@ -11417,7 +11429,7 @@
         const exact = desktopDecision?.id === message.id && desktopDecision?.owner === message.owner;
         sendResponse({ safe: temporaryPlannerPage() && location.href.includes(`cos-input=${message.id}`) &&
           !generating && !CLF_DOM.generating() && pendingTools === 0 && !CLF_DOM.hasComposerAttachments() &&
-          !(CLF_DOM.composer()?.textContent || '').trim() &&
+          !composerDraft().trim() &&
           (users.length === 0 || (exact && users.length === 1 && matchesSubmittedUser(users[0], desktopDecision.text))) });
         return false;
       }

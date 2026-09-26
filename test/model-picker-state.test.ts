@@ -305,7 +305,7 @@ it.each([true, false])('discovers 5.6 Pro outside Latest through the content wor
     availability: { status: available ? 'available' : 'upgrade_required' },
     category: { ...latest[2]!.category, shortLabel: '5.6 Pro', modelVersion: '5.6' } as any }];
   const ask = vi.fn(async () => ({ ok: true }));
-  const section = contentSource.slice(contentSource.indexOf('  function catalogPageReady('), contentSource.indexOf('  /** Popup commands target this tab'));
+  const section = contentSource.slice(contentSource.indexOf('  function composerDraft('), contentSource.indexOf('  /** Popup commands target this tab'));
   const run = page.window.Function('ask', `
     const alive = true, epoch = 1, conversationId = null;
     let desktopInputBusy = false, modelCatalogBusy = false, generating = false;
