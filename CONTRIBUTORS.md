@@ -222,6 +222,15 @@ The merge history preserves the authored commits. The fork also incorporates
 Portuguese localization [#385](https://github.com/totec448-spec/chat-on-steroids/pull/385).
 The French catalog came from the reviewed upstream merge [#372](https://github.com/totec448-spec/chat-on-steroids/pull/372).
 
+The 2.1.15 synchronization also carries upstream's authored history through
+[main](https://github.com/totec448-spec/chat-on-steroids/commits/main), including the
+post-release worker, command-policy, recovery and localization PRs. The fork separately
+cherry-picked [@WanxTitanx](https://github.com/WanxTitanx)'s elected-tab marker repair
+[#410](https://github.com/totec448-spec/chat-on-steroids/pull/410) and
+[@lavalava45](https://github.com/lavalava45)'s editable Compact & Resume handoff prompt
+[#388](https://github.com/totec448-spec/chat-on-steroids/pull/388). The latter retains the
+fork's detailed default content policy. Both commits retain their original authors.
+
 ## Preserving credit
 
 Keep original authorship when merging a contribution. When adapting or consolidating contributed work, name the original author and PR, and preserve appropriate `Co-authored-by` trailers using the contributor's public GitHub noreply identity. Reports and review deserve explicit acknowledgment without inventing code authorship. See [CONTRIBUTING.md](CONTRIBUTING.md#credit-and-attribution).

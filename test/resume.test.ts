@@ -33,7 +33,7 @@ vi.mock('electron', () => ({
   shell: {}
 }));
 
-const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, setSecret } = await import('../src/main/secrets.js');
 const { bridgePort, pendingCommands, resetBridgeForTests, resumeJobFor, setBrowserOpener, startBridge, stopBridge } =
   await import('../src/main/bridge.js');
@@ -404,7 +404,7 @@ describe('one press, one transaction', () => {
     const conversationId = 'f0f00099-1111-4111-8111-111111111111';
     await connect();
     await record(conversationId);
-    const previous = defaultConfig();
+    const previous = getConfig();
     const custom = 'CUSTOM COMPACTION BRIEF: preserve only continuation-critical state.';
     await saveConfig({
       ...previous,

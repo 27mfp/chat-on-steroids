@@ -2298,13 +2298,11 @@ describe('handoff storage', () => {
     expect(chunkText('short brief', 1000)).toEqual(['short brief']);
   });
 
-  it('asks for dense user-authoritative handoffs without forcing a near-message-limit brief', () => {
+  it('preserves the full user specification and verified state in the default handoff', () => {
     const prompt = nativeHandoffPrompt();
     expect(prompt).toContain(DEFAULT_HANDOFF_PROMPT);
     expect(prompt).toMatch(/user's messages as the highest-authority source/i);
-    expect(prompt).toMatch(/2,000-6,000 tokens/i);
-    expect(prompt).toMatch(/Compress completed chronology aggressively/i);
-    expect(prompt).toMatch(/never pad the brief/i);
+    expect(prompt).toContain('10,000–30,000 tokens');
     expect(prompt).toMatch(/failure.*root cause.*change.*verification/i);
     expect(prompt).toMatch(/FAILED \/ UNRESOLVED/i);
     expect(prompt).toMatch(/VERIFICATION/i);

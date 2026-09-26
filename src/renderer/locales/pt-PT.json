@@ -1550,5 +1550,9 @@
   "{0} · syncing": "{0} · a sincronizar",
   "{0} · {1} failed": "{0} · {1} falharam",
   "{0} · {1} · {2} ago": "{0} · {1} · há {2}",
-  "{0} — found {1} · app receipt {2} · owner {3} · tool activity {4}": "{0} — encontrados {1} · recibo da aplicação {2} · responsável {3} · atividade de ferramentas {4}"
+  "{0} — found {1} · app receipt {2} · owner {3} · tool activity {4}": "{0} — encontrados {1} · recibo da aplicação {2} · responsável {3} · atividade de ferramentas {4}",
+  "Handoff prompt": "Pedido de passagem de contexto",
+  "Controls what Compact & Resume preserves in the brief. Continuation identity and recovery rules stay fixed.": "Controla o que Compactar e Retomar preserva no resumo. A identidade da continuação e as regras de recuperação mantêm-se fixas.",
+  "Saved when you leave the editor. This changes brief content only; Compact & Resume protocol framing remains fixed.": "Guardado ao sair do editor. Isto altera apenas o conteúdo do resumo; o enquadramento do protocolo de Compactar e Retomar mantém-se fixo.",
+  "Handoff prompt restored to default": "Pedido de passagem de contexto reposto para o valor predefinido"
 }

@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-17**, including the 2.1.14 release candidate. App/extension **2.1.14**,
+Source alignment: **2026-09-26**, including upstream 2.1.15 and selected fork integrations. App/extension **2.1.15**,
 bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
 
@@ -2262,9 +2262,10 @@ awaiting-summary -> awaiting-chat -> claimed -> committing -> committed
    latest convenient assistant text. The user may edit the **content instructions** used to
    write that brief; continuation markers, send/provenance framing, tool-detail policy and the
    requirement that the compaction reply contain only the brief remain code-owned invariants.
-   The shipped content prompt prefers a dense roughly 2k-6k-token operational handoff for a
-   substantial session, shorter when less state exists and longer only when correctness needs
-   it. Preparing a brief does not yet publish a rebind.
+   The fork retains its detailed default for substantial sessions (roughly 10k–30k tokens
+   when the material warrants it); shorter briefs are appropriate when there is less useful
+   state. Editing the content instructions cannot narrow the original user request or alter
+   the protocol. Preparing a brief does not yet publish a rebind.
 4. **Elect B and commit.** Destination creation/claim has one opening owner. B must present
    the exact continuation context; early B observations are gated to prevent a shadow local
    session. Persist the committing decision, rebind S's metadata, then publish projections.
