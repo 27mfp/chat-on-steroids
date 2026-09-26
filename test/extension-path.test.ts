@@ -9,6 +9,7 @@ const originalResourcesPath = (process as NodeJS.Process & { resourcesPath?: str
 afterEach(async () => {
   vi.resetModules();
   vi.doUnmock('electron');
+  vi.unstubAllEnvs();
   if (base) await removeTempDir(base);
   base = null;
   Object.defineProperty(process, 'resourcesPath', {
@@ -16,6 +17,24 @@ afterEach(async () => {
     writable: true,
     value: originalResourcesPath
   });
+});
+
+it('shows only the fork companion supplied by the isolated launcher', async () => {
+  base = await makeTempDir('clf-fork-extension-');
+  const source = path.join(base, 'extension');
+  const isolated = path.join(base, 'fork-extension');
+  await fs.mkdir(source);
+  await fs.mkdir(isolated);
+  await fs.writeFile(path.join(source, 'manifest.json'), '{}');
+  await fs.writeFile(path.join(isolated, 'manifest.json'), '{}');
+  vi.stubEnv('COS_FORK_INSTANCE', '1');
+  vi.stubEnv('COS_FORK_EXTENSION_DIR', isolated);
+  vi.doMock('electron', () => ({ app: { isPackaged: false, getAppPath: () => base } }));
+
+  const { extensionDir } = await import('../src/main/extension-path.js');
+  expect(extensionDir()).toBe(isolated);
+  await fs.rm(path.join(isolated, 'manifest.json'));
+  expect(extensionDir()).toBeNull();
 });
 
 it('materializes a packaged extension into a stable per-user folder', async () => {

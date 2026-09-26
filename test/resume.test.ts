@@ -17,7 +17,7 @@ import fs from 'node:fs/promises';
 import nodePath from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContinuationSnapshot } from '../src/main/session/continuation.js';
-import { MAX_CHATGPT_MESSAGE_CHARS } from '../src/shared/user-prompt.js';
+import { MAX_CHATGPT_MESSAGE_CHARS, userPromptText } from '../src/shared/user-prompt.js';
 import { nativeHandoffPrompt } from '../src/main/session/handoff-prompt.js';
 import { resumeBootstrapText } from '../src/main/session/handoff.js';
 
@@ -39,12 +39,15 @@ const { bridgePort, pendingCommands, resetBridgeForTests, resumeJobFor, setBrows
 const durable = await import('../src/main/durable.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableSoon } = durable;
 const { getSession, initSessionStore, resetSessionStoreForTests, updateSessionPlan } = await import('../src/main/session/store.js');
+const { addProject, assignSessionProject } = await import('../src/main/projects.js');
+const { resumePromptAuthoredCharBudget } = await import('../src/main/session/prompt.js');
 const { resetRecorderForTests, sessionForConversation } = await import('../src/main/session/recorder.js');
 const { resetSwarm } = await import('../src/main/agents.js');
 const {
   CONTINUATIONS_STATE,
   restoreContinuations
 } = await import('../src/main/session/continuation.js');
+const { RESUME_CLAIM_WINDOW_MS, resumeOpeningChat } = await import('../src/main/session/resume-gate.js');
 const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
 const { BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 
@@ -152,7 +155,7 @@ beforeAll(async () => {
   initSessionStore(dir);
   initDurableStore(dir);
   const baseConfig = defaultConfig();
-  await saveConfig({ ...baseConfig, sessions: { ...baseConfig.sessions, record: true } });
+  await saveConfig({ ...baseConfig, roots: [{ name: 'work', path: dir }], sessions: { ...baseConfig.sessions, record: true } });
   const port = await startBridge();
   expect(port, 'no loopback port in 8765-8769 was free').not.toBeNull();
   base = `http://127.0.0.1:${port}`;
@@ -468,24 +471,50 @@ describe('a brief longer than the app can type', () => {
     expect(text.length).toBeLessThanOrEqual(MAX_CHATGPT_MESSAGE_CHARS);
   });
 
-  it('carries a large near-budget handoff without a hidden character-budget truncation', async () => {
+  it('carries a large near-budget handoff beside restored executor context without hidden truncation', async () => {
     await connect();
-    await record();
+    const sessionId = await record();
     const { token: continuation } = await press();
     const head = 'TASK — keep all of this.\n', tail = '\nNEXT — continue exactly here.';
+    const authoredBudget = await resumePromptAuthoredCharBudget({ sessionId });
     const overhead = resumeBootstrapText('', continuation).length;
     const brief = head + 'dense operational detail '.repeat(6500).slice(0,
-      MAX_CHATGPT_MESSAGE_CHARS - overhead - head.length - tail.length - 8) + tail;
+      authoredBudget - overhead - head.length - tail.length - 8) + tail;
 
     const stored = await capture(continuation, brief);
     const commandId = stored.body.commandId as string;
     const text = (await redeem(commandId, 'page-long')).body.command.text as string;
 
     expect(text).toContain(brief);
-    expect(text).not.toContain('[[COS_CONTEXT:');
+    expect(text).toContain('[[COS_CONTEXT:');
+    expect(userPromptText(text)).toBe(resumeBootstrapText(brief, continuation));
     expect(text).not.toMatch(/middle of this brief.*left out/);
     expect(text.length).toBeLessThanOrEqual(MAX_CHATGPT_MESSAGE_CHARS);
     expect(text.length).toBeGreaterThan(MAX_CHATGPT_MESSAGE_CHARS - 100);
+  });
+
+  it('rehydrates current Core and the durable project AGENTS into the replacement chat', async () => {
+    await connect();
+    const projectDir = nodePath.join(dir, 'resume-project');
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(nodePath.join(projectDir, 'AGENTS.md'), 'RESUME_PROJECT_RULE_ONLY\nKeep the durable project binding.');
+    const project = await addProject(projectDir);
+    const sessionId = await record();
+    await assignSessionProject(sessionId, project.id);
+    const { token: continuation } = await press();
+    const handoff = 'TASK — continue the bound project.\n' +
+      'CURRENT STATE — the implementation already exists and must keep the durable project association.\n'.repeat(3) +
+      'NEXT — inspect the existing implementation and continue without restarting the task.';
+    const stored = await capture(continuation, handoff);
+    expect(stored.status).toBe(200);
+    const text = (await redeem(stored.body.commandId, 'page-context')).body.command.text as string;
+
+    expect(text.startsWith(`[[CLF-RESUME:${continuation}]]\n\n[[COS_CONTEXT:`)).toBe(true);
+    expect(text).toContain('Selected project directory: /work/resume-project');
+    expect(text).toContain('RESUME_PROJECT_RULE_ONLY');
+    expect(text).toContain('# Local tools');
+    expect(userPromptText(text)).toBe(resumeBootstrapText(handoff, continuation));
+    expect(text.length).toBeLessThanOrEqual(MAX_CHATGPT_MESSAGE_CHARS);
   });
 
   it('delivers the saved plan with the exact continuation marker inside the message limit', async () => {
@@ -578,6 +607,29 @@ describe('the replacement chat', () => {
     expect(
       (await request('POST', '/compact', { body: { token: continuation, commandId, client: 'page-3', destinationAttempt: true } })).body.allowed
     ).toBe(false);
+  });
+
+  it('refreshes the no-shadow gate when a slow replacement finally arms its Send', async () => {
+    await connect();
+    await record();
+    const { token: continuation } = await press();
+    const commandId = (await capture(continuation)).body.commandId as string;
+    await redeem(commandId, 'slow-page');
+
+    // The page may spend longer than the recorder gate waiting for ChatGPT/model/composer
+    // readiness. Expire that original redeem-time claim without sleeping in the test.
+    expect(resumeOpeningChat(Date.now() + RESUME_CLAIM_WINDOW_MS + 1)).toBe(false);
+
+    const attempted = await request('POST', '/compact', {
+      body: { token: continuation, commandId, client: 'slow-page', destinationAttempt: true }
+    });
+    expect(attempted.body.allowed).toBe(true);
+
+    const armed = await request('POST', '/compact', {
+      body: { token: continuation, commandId, client: 'slow-page', destinationDispatch: true }
+    });
+    expect(armed.body.armed).toBe(true);
+    expect(resumeOpeningChat()).toBe(true);
   });
 
   /**

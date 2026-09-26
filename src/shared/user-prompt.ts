@@ -39,7 +39,12 @@ export function userPromptText(text: string): string | null {
   const exact = readFrame(text);
   if (exact !== null) return exact;
   const typed = asTyped(text);
-  return typed === text ? null : readFrame(typed);
+  const escaped = typed === text ? null : readFrame(typed);
+  if (escaped !== null) return escaped;
+  // The native Markdown serializer can also spell an indented space as a literal
+  // entity. Decode only after the exact and punctuation-escaped frames fail.
+  const entitySpaces = typed.replace(/&#x20;/gi, ' ');
+  return entitySpaces === typed ? null : readFrame(entitySpaces);
 }
 
 export function prependUserPrompt(text: string, instructions: string): string {

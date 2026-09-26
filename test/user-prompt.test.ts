@@ -33,6 +33,23 @@ it('preserves the entire Unicode prompt and literal boundary-like user text acro
   } finally { page.window.close(); }
 });
 
+it('reads an opening whose native Markdown source encodes indented spaces as entities', () => {
+  const page = new JSDOM('', { runScripts: 'outside-only' });
+  try {
+    page.window.eval(readFileSync('extension/chatgpt-dom.js', 'utf8'));
+    const api = (page.window as any).CLF_DOM;
+    const sent = prependUserPrompt('test', 'Colours:\n  - Green\n  - Amber');
+    const escaped = sent.replace(/([!-/:-@[-`{-~])/g, '\\$1').replace(/\n/g, '\\\n');
+    const readback = escaped.replaceAll('  \\-', '&#x20; \\-');
+    expect(readback).not.toBe(escaped);
+    expect(userPromptText(readback)).toBe('test');
+    expect(api.userPromptText(readback)).toBe('test');
+    const literal = prependUserPrompt('test', 'Literal &#x20; belongs here');
+    expect(userPromptText(literal)).toBe('test');
+    expect(api.userPromptText(literal)).toBe('test');
+  } finally { page.window.close(); }
+});
+
 it('hides only the framed prefix while preserving native message bytes and controls through repaint', () => {
   const page = new JSDOM('<section data-testid="conversation-turn-0"><div data-message-id="user-1" data-message-author-role="user"><div class="whitespace-pre-wrap"></div><button>Copy</button></div></section>', { runScripts: 'outside-only' });
   try {

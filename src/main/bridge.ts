@@ -4,7 +4,7 @@ import { browserControl } from './browser-control.js';
 import type { BrowserResult } from '../shared/browser-control.js';
 import { goalErrorMessage } from '../shared/goal-errors.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, userPromptText } from '../shared/user-prompt.js';
-import { prepareSessionPrompt } from './session/prompt.js';
+import { prepareResumePrompt, prepareSessionPrompt } from './session/prompt.js';
 import { pendingChatModelRequest, observeChatModels, requestChatModels } from './chat-models.js';
 import { isProModel } from '../shared/chat-models.js';
 import { supportsFinishAutomation } from '../shared/finish.js';
@@ -54,6 +54,7 @@ export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
 import { effectiveCapabilities, getConfig, updateConfig } from './config.js';
 import { BROWSER_BRIDGE_PORTS } from '../shared/browser-bridge.js';
 import { bridgePortSelection } from './bridge-ports.js';
+import { bridgeAppId } from './fork-instance.js';
 import type { Config } from '../shared/types.js';
 import { getSecret, secureStorageStatus, setSecret } from './secrets.js';
 import {
@@ -1721,7 +1722,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       res,
       200,
       {
-        app: 'chat-on-steroids',
+        app: bridgeAppId(),
         version: APP_VERSION,
         bridge: BRIDGE_PROTOCOL,
         compatible: protocolCompatible(req),
@@ -2838,26 +2839,24 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       );
     }
     if (body['destinationLost'] === true) {
-      // The page armed the click and then proved the brief never left it. The lease belongs to
-      // that page and is retired with it, and the same brief is offered to a fresh chat at once —
-      // not after the quarter-hour the lease was measured for, and for a manual Compact & Resume
-      // as much as an automatic one: the ticket exists to land the brief, and Cancel is there
-      // for a user who meant the Escape.
+      // A proven no-click failure closes this transaction. Reoffering the same brief
+      // automatically here can loop through fresh tabs when native Send repeatedly rejects
+      // the same editor, as observed live. Keep the source session attached to A and report
+      // the failure instead of opening another browser page.
       const released = await destinationTransition(() => releaseContinuationDestinationSendNow(checkpointToken));
       if (released) {
         const entry = continuationByToken(checkpointToken);
+        const reason = 'the replacement chat did not reach native Send; nothing was submitted';
+        const aborted = await abortContinuationNow(checkpointToken, reason);
+        if (!aborted && continuationByToken(checkpointToken)?.state !== 'aborted') {
+          return json(res, 503, { error: 'destination_abort_not_durable', retryable: true }, origin);
+        }
         for (const command of commands.filter(
           (candidate) => candidate.spec.type === 'resume' && candidate.spec.token === checkpointToken
         )) {
-          retire(command, 'the page lost the brief before Send; nothing was sent');
+          retire(command, reason);
         }
-        if (entry) {
-          queueResumeCommand(entry.sessionId, checkpointToken);
-          void deliver();
-        }
-        logInfo(
-          `bridge: the brief for ${entry?.sessionId ?? checkpointToken.slice(0, 8)} was lost before Send — offering it to a fresh chat`
-        );
+        logWarn(`bridge: the brief for ${entry?.sessionId ?? checkpointToken.slice(0, 8)} stopped before Send`);
       }
       return json(
         res,
@@ -3859,12 +3858,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     const described = describe(command, client, claimedSummary);
     if (described.text && command.spec.type === 'worker') {
-      // A newly spawned worker gets setup once. Revival and Compact & Resume
-      // carry their own continuation text without repeating executor setup.
+      // A newly spawned worker gets setup once. Revival carries its own continuation text.
       const sourceConversation = primeConversation(command.spec.runId);
       const source = sourceConversation ? await findSessionByConversation(sourceConversation, { requireUnique: true }) : null;
       const sessionId = source?.conversationId === sourceConversation ? source?.id : undefined;
       described.text = await prepareSessionPrompt(described.text, { sessionId });
+    } else if (described.text && command.spec.type === 'resume') {
+      // Resume opens a genuinely fresh ChatGPT conversation. Rehydrate the current Core and
+      // durable session/project context just like any other fresh executor, but never infer
+      // Skills from the generated handoff text itself.
+      described.text = await prepareResumePrompt(described.text, { sessionId: command.spec.sessionId });
     }
     if (!commands.includes(command) || command.owner !== client) return json(res, 409, { error: 'command_taken' }, origin);
     const liveResume = command.spec.type === 'resume' ? continuationByToken(command.spec.token) : null;

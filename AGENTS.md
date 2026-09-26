@@ -362,14 +362,16 @@ permission decision alongside a cached schema.
 ### Instructions must actually reach the executor
 
 MCP initialize advertises `instructions`; successful initialize does not prove the host showed
-all of them to the model. Only the first normal message of a new chat and the first bootstrap
-of a newly spawned worker use `session/prompt.ts` to freeze the complete current Core instructions
-plus the explicitly linked project directory and its root `AGENTS.md` inside the existing
-`COS_CONTEXT` frame. The directory and default-workdir guidance remain present when AGENTS.md
-is absent, empty or reading is disabled; no file content is read when read permission is off.
-The opening outbox input / new-worker command owns this eligibility; no history scan or extra
-sent flag decides it. Existing-chat messages, Goal/Loop continuations, plan checkpoints, worker
-revivals, compaction requests and resumed-chat bootstraps receive no appended setup block.
+all of them to the model. The first normal message of a new chat, the first bootstrap of a newly
+spawned worker, and the destination bootstrap of Compact & Resume use `session/prompt.ts` to
+freeze the complete current Core instructions plus the explicitly linked project directory and
+its root `AGENTS.md` inside the existing `COS_CONTEXT` frame. Resume uses the durable session's
+project binding and never selects Skills from words inside the generated handoff. The directory
+and default-workdir guidance remain present when AGENTS.md is absent, empty or reading is disabled;
+no file content is read when read permission is off. The opening outbox input / new-worker /
+resume command owns this eligibility; no history scan or extra sent flag decides it. Existing-chat
+messages, Goal/Loop continuations, plan checkpoints, worker revivals and compaction requests receive
+no appended setup block.
 Decision/planner helpers keep their separate role-specific contract. Selecting Goal/Loop for
 a normal new executor chat does not turn it into a helper. Direct user sends in Chrome are
 not intercepted.
@@ -2274,10 +2276,15 @@ Every compaction reload rechecks its original continuation token and phase at ha
 browser action claim. Cancellation, replacement, source dispatch and completed capture revoke
 obsolete pickup authority. Recovery text distinguishes an unsent request from an outstanding
 answer; neither implies a completed brief exists. A reloaded source waits for its visible,
-editable composer and recorded original question before freezing the source identity or stopping
+editable composer and original user-message identity before freezing the source identity or stopping
 the turn. Already observed identities and a real user Send remain cancellation boundaries during
 hydration; an empty loading DOM must not be treated as a different conversation. The source
-rechecks the composer before insertion. Failed manual preparation retires only its exact pre-Send token and
+rechecks the composer before insertion. If ChatGPT remounts that editor just after insertion,
+the source waits for the same exact marked draft in the current editable composer before its
+send claim; a direct user key/pointer/paste/drop interaction revokes that wait. Native input
+events alone do not: the browser can emit them for the app's own edit. Once Stop settles, the
+source handoff Send belongs to that user-message identity rather than the retired generation's
+transient turn id. Failed manual preparation retires only its exact pre-Send token and
 stores a bounded concrete failure reason. Existing user drafts remain intact. Ambiguous dispatched
 requests retain their existing custody and cannot be sent again merely because a receipt is absent.
 
@@ -2299,9 +2306,21 @@ stays null and is never reconstructed from a later change in A.
 An expired automatic browser command durably releases only its own unattempted destination
 claim before command retirement. Redeem, destination checkpoints and retirement serialize
 through command custody; checkpoints also prove the exact document owner and WAL claimant.
+If the destination Send helper proves it never reached the native click, the owning command
+ends with a durable failure, including readiness failures before an attempt checkpoint. A
+no-click failure never opens another tab automatically; repeated native refusal otherwise
+loops through fresh tabs. The local session remains attached to the source chat.
 Attempted/ambiguous sends retain their fence. A committing transaction or failed durable
 retirement grants no immediate delivery retry. A loading destination can checkpoint only on
 its owned URL; a foreign pending route remains ineligible.
+
+A destination document may legitimately spend longer than the recorder's 60-second claim window
+waiting for ChatGPT/model/composer readiness after redeem. The durable destination-dispatch
+checkpoint therefore refreshes that same bounded no-shadow window immediately before native
+Send, when B can actually begin to exist. This refresh belongs to the existing continuation
+claim; it does not authorize another destination or another Send. If ChatGPT remounts the
+destination editor before the native click, the same command may elect the new editor only
+while its exact resume draft, route and user-interaction fence still hold.
 
 Before a pickup can Stop the original answer, refresh the ticket's source-send checkpoint.
 An already dispatched or sent summary request can only be observed, never stopped by another
@@ -2326,7 +2345,11 @@ turns. User interaction, cancellation or a foreign route revokes the attempt; no
 second click compensates for a missing result.
 
 The brief includes the original task, accepted steering, current result, remaining checks and
-relevant durable ids. Linked project instructions and current executor settings still apply.
+relevant durable ids. The replacement message carries that brief as authored text inside a fresh
+`COS_CONTEXT` containing current Core instructions and the durable session's linked project /
+`AGENTS.md`. Handoff storage reserves room for mandatory Core + project identity before making the
+brief durable; remaining message space is spent on AGENTS content. Linked project instructions and
+current executor settings therefore actually reach B rather than existing only as local metadata.
 Goal context can use a committed handoff as a provenance anchor; aborted/stale/legacy text is
 not one. A source reply obligation must be superseded when its work has moved, rather than
 mistaken for B's completed turn (§21 records the remaining ledger gap).

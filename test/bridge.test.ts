@@ -2936,7 +2936,7 @@ describe('delivering a bootstrap', () => {
     expect((await request('POST', '/commands/redeem', { body: { id: command.id, client: 'tab-4' } })).status).toBe(409);
   });
 
-  it('offers the brief to a fresh chat once the page proves it lost the draft before Send', async () => {
+  it('aborts the exact continuation when the page proves it lost the draft before Send', async () => {
     // 2026-09-02: the replacement chat opened, the brief landed, and the user's Escape emptied
     // the composer in the same instant. The ticket then sat armed for its six hours, the page
     // journalled nothing typed into it, and the run could not move on.
@@ -2952,13 +2952,10 @@ describe('delivering a bootstrap', () => {
     const lost = await request('POST', '/compact', { body: { token, commandId: command.id, client: 'tab-1', destinationLost: true } });
     expect(lost.status).toBe(200);
     expect(lost.body.released).toBe(true);
-    // The lease went with the page that lost the draft, and a fresh chat opens for the same
-    // brief at once instead of waiting out the quarter-hour lease.
+    // Repeating the same native Send refusal must not create an automatic tab loop.
+    expect(continuationByToken(token)?.state).toBe('aborted');
     expect((await request('POST', '/commands/redeem', { body: { id: command.id, client: 'tab-1' } })).status).toBe(404);
-    await vi.waitFor(() => expect(opened.length).toBeGreaterThan(before));
-    const reopened = new URL(opened[opened.length - 1]!).searchParams.get('clf')!;
-    expect(reopened).not.toBe(command.id);
-    expect((await redeem(reopened, 'tab-3')).text).toContain('the lost brief');
+    expect(opened).toHaveLength(before);
     expect((await request('POST', '/compact', { body: { token: 'ffffffffffffffffffffffffffffffff', destinationLost: true } })).status).toBe(409);
   });
 
@@ -3241,7 +3238,7 @@ describe('delivering a bootstrap', () => {
     expect(JSON.stringify(stored)).not.toContain('joinKey');
   });
 
-  it.each(['worker', 'resume'] as const)('adds setup only to a new worker, never a resumed chat (%s)', async kind => {
+  it.each(['worker', 'resume'] as const)('adds current setup to a new executor without selecting Skills from its generated brief (%s)', async kind => {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
     const { addProject, assignSessionProject } = await import('../src/main/projects.js');
@@ -3264,17 +3261,11 @@ describe('delivering a bootstrap', () => {
       command = await redeem(pending.id);
     }
     expect(command.text.length).toBeLessThanOrEqual(96000);
-    if (kind === 'worker') {
-      expect(command.text).toContain(await currentCoreInstructions());
-      expect(command.text).toContain('SCOPED_AGENTS_HEAD');
-      expect(command.text).toContain('Read AGENTS.md yourself');
-      expect(userPromptText(command.text)).toContain('PROJECT_TASK_PRESERVED');
-      expect(userPromptText(command.text)).not.toMatch(/SCOPED_AGENTS|Cut off/);
-    } else {
-      expect(command.text).not.toContain('[[COS_CONTEXT:');
-      expect(command.text).not.toContain('SCOPED_AGENTS_HEAD');
-      expect(command.text).toContain('PROJECT_TASK_PRESERVED');
-    }
+    expect(command.text).toContain(await currentCoreInstructions());
+    expect(command.text).toContain('SCOPED_AGENTS_HEAD');
+    expect(command.text).toContain('Read AGENTS.md yourself');
+    expect(userPromptText(command.text)).toContain('PROJECT_TASK_PRESERVED');
+    expect(userPromptText(command.text)).not.toMatch(/SCOPED_AGENTS|Cut off/);
     expect(command.text).not.toContain('SCOPED_AGENTS_TAIL');
   });
 

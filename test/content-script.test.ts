@@ -1427,6 +1427,41 @@ describe('desktop input delivery and helper ownership', () => {
     expect(clicks).toBe(1);
   });
 
+  it.each([false, true])('acknowledges one framed opening after ChatGPT escapes punctuation and hard line breaks (entity spaces: %s)', async (entitySpaces) => {
+    const instructions = `Read \`src/main/bridge.ts\`.\n\n# Check the owner${entitySpaces ? '\n  - Check green' : ''}`;
+    const prompt = `[[COS_CONTEXT:${instructions.length}]]\n${instructions}\n[[/COS_CONTEXT]]\n\nhi`;
+    const escaped = prompt.replace(/([!-/:-@[-`{-~])/g, '\\$1').replace(/\n/g, '\\\n');
+    const readback = entitySpaces ? escaped.replaceAll('  \\-', '&#x20; \\-') : escaped;
+    live = await harness(`https://chatgpt.com/?cos-input=${inputId}`, {
+      desktop_input: message => ({ ok: true, data: message.authorize || message.ack
+        ? { ok: true } : { input: claimed({ text: prompt, opening: true }) } })
+    }, undefined, false, true);
+    let user!: HTMLElement;
+    let clicked!: () => void;
+    let clicks = 0;
+    const click = new Promise<void>(resolve => { clicked = resolve; });
+    live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+      clicks++;
+      live!.dom.reconfigure({ url: `https://chatgpt.com/c/${chatA}` });
+      user = userTurn(live!.document, 'escaped-opening-user', readback, { sent: false });
+      live!.document.querySelector('#prompt-textarea')!.textContent = '';
+      clicked();
+    });
+    const delivery = live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null });
+    await click;
+    await bindFiberTurns([{ section: user, turn: { turnId: 'escaped-opening-user', conversationId: chatA,
+      messages: [{ role: 'user', stable: true, messageId: 'm-escaped-opening-user',
+        rawMessageId: 'm-escaped-opening-user', rawText: readback }] } }], true);
+    expect(await delivery).toEqual({ ok: true });
+    expect(live.sent.filter(message => message.ack)).toEqual([
+      expect.objectContaining({ messageId: 'm-escaped-opening-user', conversationId: chatA })
+    ]);
+    live.hook.observe();
+    await live.hook.flush();
+    expect(emitted(live.sent, 'turn_start')).toHaveLength(1);
+    expect(clicks).toBe(1);
+  });
+
   it.each([false, true])('acknowledges a helper Markdown prompt with delayed provider evidence (fresh: %s)', async (fresh) => {
     const prompt = ('Inspect `src/main/bridge.ts` and report the exact next step.\n').repeat(1800);
     const rendered = prompt.replaceAll('`', '');
@@ -1803,6 +1838,11 @@ function userTurn(document: Document, id: string, text: string, options: { sent?
   section.append(message);
   document.querySelector('#thread')!.append(section);
   return section;
+}
+
+/** A real Compact & Resume source has an authored question loaded before its Stop barrier. */
+function compactableSource(page: Harness, id = 'compact-source-question'): void {
+  userTurn(page.document, id, 'Continue the existing work.', { sent: false });
 }
 
 /** The app-owned Overwrite surface for one logical assistant turn. */
@@ -11965,6 +12005,7 @@ describe('the Compact & resume control', () => {
       },
       compact: () => ({ ok: true, data: { started: true, prompt: 'must never be requested' } })
     });
+    compactableSource(live);
     live.hook.injectControl();
     const sends = watchSend(live.document);
 
@@ -12006,6 +12047,7 @@ describe('the Compact & resume control', () => {
         }
       })
     });
+    compactableSource(live);
     live.hook.injectControl();
     watchSend(live.document);
 
@@ -12034,6 +12076,7 @@ describe('the Compact & resume control', () => {
       },
       compact: () => ({ ok: true, data: { started: true, prompt: 'must never be requested' } })
     });
+    compactableSource(live);
     live.hook.injectControl();
     const sends = watchSend(live.document);
 
@@ -12063,6 +12106,7 @@ describe('the Compact & resume control', () => {
             }
       })
     });
+    compactableSource(live);
     live.hook.injectControl();
     startGenerating(live.document); // and nothing ever clears it
     live.document.querySelector('[data-testid="stop-button"]')?.addEventListener('click', (event) => event.preventDefault());
@@ -12095,6 +12139,7 @@ describe('the Compact & resume control', () => {
             }
       })
     });
+    compactableSource(live);
     live.hook.injectControl();
     const sends = watchSend(live.document);
     live.document.querySelector('#prompt-textarea')!.textContent = 'half a question I was still typing';
@@ -12133,6 +12178,7 @@ describe('the Compact & resume control', () => {
               }
             }
     });
+    compactableSource(live);
     live.hook.injectControl();
     live.document.querySelector('#prompt-textarea')!.textContent = 'draft that makes prompt insertion fail';
 
@@ -12242,6 +12288,7 @@ describe('the Compact & resume control', () => {
       compact: () => ({ ok: true, data: { started: true, token: 'waiting-for-editor', prompt: 'Write the exact handoff brief.',
         job: { sessionId: 'editor-session', stage: 'handoff-pending', busy: true, handoffId: null, error: null } } })
     });
+    compactableSource(live);
     live.hook.injectControl();
     const box = live.document.querySelector('#prompt-textarea')!;
     const parent = box.parentNode!;
@@ -12276,6 +12323,7 @@ describe('the Compact & resume control', () => {
         : { ok: true, data: { started: true, token: 'send-readiness-token', prompt: 'Write the exact handoff brief.',
           job: { sessionId: 'send-readiness-session', stage: 'handoff-pending', busy: true, handoffId: null, error: null } } }
     });
+    compactableSource(live);
     live.hook.injectControl();
     const button = live.document.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!;
     button.disabled = true;
@@ -12307,6 +12355,7 @@ describe('the Compact & resume control', () => {
         : { ok: true, data: { started: true, token: 'failed-editor', prompt: 'Write the handoff brief.',
           job: { sessionId: 'editor-session', stage: 'handoff-pending', busy: true, handoffId: null, error: null } } }
     });
+    compactableSource(live);
     live.hook.injectControl();
     const sends = watchSend(live.document);
     if (reason === 'composer_missing') live.document.querySelector('#prompt-textarea')!.remove();
@@ -12356,6 +12405,8 @@ describe('the Compact & resume control', () => {
           }
         };
       }
+    }, document => {
+      userTurn(document, 'stale-draft-source-question', 'Continue the existing work.', { sent: false });
     });
     live.hook.injectControl();
     const stale =
@@ -12393,6 +12444,7 @@ describe('the Compact & resume control', () => {
             }
       })
     });
+    compactableSource(live);
     live.hook.injectControl();
     const sends = watchSend(live.document);
     const document = live.document;
@@ -12420,7 +12472,7 @@ describe('the Compact & resume control', () => {
     expect(composerText(live.document)).toContain('my unrelated draft');
     const compacts = live.sent.filter((message) => message.type === 'compact');
     expect(compacts.at(-1)).toMatchObject({ token: 'tok-composer-race', sourceLost: true,
-      sourceError: expect.stringContaining('message box changed') });
+      sourceError: expect.stringContaining('exact draft unavailable') });
   });
 
   /**
@@ -12591,6 +12643,7 @@ describe('the Compact & resume control', () => {
         }
       };
     });
+    compactableSource(live);
     live.hook.injectControl();
 
     // The gear opens the sheet; the sheet's action row is the press. One path still — the
@@ -12641,6 +12694,7 @@ describe('the Compact & resume control', () => {
                 }
               }
     });
+    compactableSource(live);
     live.hook.injectControl();
     const sends = watchSend(live.document);
 
@@ -12683,6 +12737,7 @@ describe('the Compact & resume control', () => {
         };
       }
     });
+    compactableSource(live);
     live.hook.injectControl();
     live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => order.push('send'));
 
@@ -12726,6 +12781,7 @@ describe('the Compact & resume control', () => {
         }
       })
     });
+    compactableSource(live);
     live.hook.injectControl();
     const sends = watchSend(live.document);
 
@@ -14722,6 +14778,7 @@ describe('the context meter and automatic compaction', () => {
         prompt: 'Write this one brief.', token: 'abcdefghijklmnop', ...automaticTicket('not-attempted')
       } }
     });
+    compactableSource(live);
     const sends = watchSend(live.document);
     const first = live.hook.startCompact();
     await settle();
@@ -14880,6 +14937,8 @@ describe('the context meter and automatic compaction', () => {
         }
         return { ok: true, data: { started: false, token: 'tok-manual', prompt: 'write the brief', ...manual() } };
       }
+    }, document => {
+      userTurn(document, 'manual-pickup-source-question', 'Continue the existing work.', { sent: false });
     });
     live.hook.injectControl();
     await live.hook.pullActivity();
@@ -16059,7 +16118,8 @@ describe('the goal loop', () => {
     // `dispatched-unresolved` even though the chat is sitting there working.
     const commandId = 'cmd-resume-escaped-render';
     const token = 'iNHBs_C0p8fcQ9y7sG-I-A';
-    const typed = `[[CLF-RESUME:${token}]]\n\n${brief}`;
+    const instructions = 'Current Core guidance.\n\nSelected project directory: /work/project';
+    const typed = `[[CLF-RESUME:${token}]]\n\n[[COS_CONTEXT:${instructions.length}]]\n${instructions}\n[[/COS_CONTEXT]]\n\n${brief}`;
     const asRendered = typed.replace('CLF-RESUME:', 'CLF-RESUME\\:').replace('iNHBs_C0', 'iNHBs\\_C0');
     let committed = false;
     live = await harness(
@@ -19080,6 +19140,36 @@ describe('app Stop command uses current native turn proof', () => {
 });
 
 describe('resume irreversible boundary audit', () => {
+  it('releases and reoffers the brief when the composer becomes unwritable after dispatch authorization but before any click', async () => {
+    const commandId = 'cmd-resume-send-button-race';
+    const token = '0123456789abcdef0123456789abcdef';
+    let page: Document;
+    let clicks = 0;
+    live = await harness(`https://chatgpt.com/?clf=${commandId}`, {
+      redeem: () => ({ ok: true, command: { id: commandId, type: 'resume', text: `[[CLF-RESUME:${token}]] handoff`, agent: null } }),
+      compact: message => {
+        if (message.destinationAttempt) return { ok: true, data: { allowed: true } };
+        if (message.destinationDispatch) {
+          page.querySelector('#prompt-textarea')!.setAttribute('contenteditable', 'false');
+          return { ok: true, data: { armed: true } };
+        }
+        if (message.destinationLost) return { ok: true, data: { released: true } };
+        return { ok: false, error: 'unexpected_compact_shape' };
+      },
+      ack: () => ({ ok: true })
+    }, document => {
+      page = document;
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { clicks++; });
+    });
+
+    await settle(300);
+
+    expect(clicks).toBe(0);
+    expect(live.sent.filter(message => message.type === 'compact' && message.destinationLost === true)).toEqual([
+      expect.objectContaining({ token, commandId })
+    ]);
+  });
+
   it('does not send a user-replaced draft after awaiting destination dispatch', async () => {
     const commandId = 'cmd-resume-draft-race';
     const token = '0123456789abcdef0123456789abcdef';

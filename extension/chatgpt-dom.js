@@ -86,7 +86,11 @@ var CLF_DOM = (() => {
     const exact = readPromptFrame(value);
     if (exact !== null) return exact;
     const typed = promptAsTyped(value);
-    return typed === value ? null : readPromptFrame(typed);
+    const escaped = typed === value ? null : readPromptFrame(typed);
+    if (escaped !== null) return escaped;
+    // ChatGPT can serialize an indented space as a literal Markdown entity.
+    const entitySpaces = typed.replace(/&#x20;/gi, ' ');
+    return entitySpaces === typed ? null : readPromptFrame(entitySpaces);
   }
   function presentUserPrompts(readUserText) {
     return safe(() => {
@@ -2103,18 +2107,33 @@ var CLF_DOM = (() => {
     }, false);
   }
 
-  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null } = {}) {
+  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null } = {}) {
+    const refused = reason => { try { onNoSend?.(reason); } catch {} return false; };
     try {
-      const box = composer();
-      if (!box || !box.isConnected || !stillCurrent() || generating() || stopButton()) return false;
-      if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return false;
+      let box = composer();
+      if (!box || !box.isConnected) return refused('composer_unavailable');
+      if (!stillCurrent()) return refused('send_lifetime_changed');
+      if (generating() || stopButton()) return refused('generation_active');
+      if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return refused('composer_disabled');
       // Rich editors use adjacent paragraphs for newlines; textContent concatenates
       // their words. Preserve those boundaries when matching the rendered user message.
-      const draftText = () => plainComposer(box) ? String(box.value || '').trim()
-        : (typeof box.innerText === 'string' ? box.innerText : [...box.childNodes]
+      const readDraft = node => plainComposer(node) ? String(node.value || '').trim()
+        : (typeof node.innerText === 'string' ? node.innerText : [...node.childNodes]
         .map((node) => (node.textContent || '') + (/^(P|DIV|BR)$/.test(node.nodeName) ? '\n' : '')).join('')).trim();
-      const submitted = draftText();
-      if (!submitted) return false;
+      const draftText = () => readDraft(box);
+      let submitted = draftText();
+      if (!submitted) return refused('draft_empty');
+      const squeeze = value => String(value || '').replace(/\s+/g, '');
+      const electCurrentEditor = () => {
+        if (composer() === box && box.isConnected) return true;
+        const replacement = composer();
+        if (!replacement?.isConnected || !acceptEditorRemount?.(replacement)) return false;
+        const replacementText = readDraft(replacement);
+        if (squeeze(replacementText) !== squeeze(submitted)) return false;
+        box = replacement;
+        submitted = replacementText;
+        return true;
+      };
       const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const expected = compact(submitted);
       const beforeConversation = conversationId();
@@ -2161,7 +2180,7 @@ var CLF_DOM = (() => {
         let observer = null;
         let timer = null;
         let unsubscribeEvidence = null;
-        const finish = (value) => {
+        const finish = (value, reason = 'send_not_accepted') => {
           if (done) return;
           done = true;
           if (observer) observer.disconnect();
@@ -2172,11 +2191,12 @@ var CLF_DOM = (() => {
           // to and resend the entire bootstrap. Preserve replaced editors/new drafts.
           if (clearAcceptedDraft && value && submittedMessageObserved && stillCurrent() && composer() === box)
             clearPromptExact(submitted);
+          if (!value && !attempted) refused(reason);
           resolve(value);
         };
         const check = () => {
           if (done) return;
-          if (!stillCurrent() || (beforeConversation && conversationId() !== beforeConversation)) return finish(false);
+          if (!stillCurrent() || (beforeConversation && conversationId() !== beforeConversation)) return finish(false, 'send_lifetime_changed');
           if (attempted) {
             if (accepted()) finish(true);
             return;
@@ -2184,21 +2204,36 @@ var CLF_DOM = (() => {
           // React can enable/mount Send after accepting our editor input. Observe that
           // readiness through this same bounded operation; neither a guessed Enter nor
           // an unrelated Stop/composer-clear is evidence that this draft was submitted.
-          if (conversationId() !== beforeConversation || composer() !== box || !box.isConnected ||
-              draftText() !== submitted || generating()) return finish(false);
+          if (conversationId() !== beforeConversation) return finish(false, 'conversation_changed');
+          if (!electCurrentEditor()) return finish(false, 'editor_replaced');
+          if (draftText() !== submitted) return finish(false, 'draft_changed');
+          if (generating()) return finish(false, 'generation_active');
           if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return;
-          const button = sendButton();
+          let button = sendButton();
           if (!sendButtonEnabled(button)) return;
           if (authorizing) return;
           const click = () => {
             if (done) return;
             // Authorization can await the app. The exact editor, text and native control
             // must still be the ones it authorized; a late answer cannot revive this send.
-            if (!stillCurrent() || conversationId() !== beforeConversation || composer() !== box ||
-                !box.isConnected || draftText() !== submitted || generating() || sendButton() !== button ||
-                !sendButtonEnabled(button) || box.getAttribute('aria-disabled') === 'true' ||
-                box.getAttribute('contenteditable') === 'false') return finish(false);
+            if (!stillCurrent() || conversationId() !== beforeConversation || !electCurrentEditor() ||
+                draftText() !== submitted || generating() || box.getAttribute('aria-disabled') === 'true' ||
+                box.getAttribute('contenteditable') === 'false') return finish(false, 'send_control_changed');
+            const liveButton = sendButton();
+            if (liveButton !== button) {
+              if (!acceptEditorRemount?.(box)) return finish(false, 'send_control_changed');
+              button = liveButton;
+            }
+            if (!sendButtonEnabled(button)) return finish(false, 'send_control_changed');
             attempted = true;
+            // The caller may have durably armed an irreversible send just before this final
+            // native boundary. Report only once every route/editor/button check above still
+            // passes and we are genuinely about to invoke the provider's Send control. This
+            // lets that caller distinguish a provable pre-click abort from an ambiguous click
+            // whose provider receipt never appeared.
+            if (onSendAttempt) {
+              try { onSendAttempt(); } catch {}
+            }
             // The deadline bounds readiness, not an already-dispatched receipt.
             // Keep this same observer and exact send lifetime until the provider
             // publishes its identity; never click again because that is delayed.
@@ -2210,8 +2245,8 @@ var CLF_DOM = (() => {
           authorizing = true;
           // Claim/dispatch authority belongs at readiness, not before a possibly long
           // disabled-Send wait. This is still one attempt under the existing deadline.
-          try { Promise.resolve(beforeSend(() => !done && stillCurrent())).then(allowed => allowed === true ? click() : finish(false), () => finish(false)); }
-          catch { finish(false); }
+          try { Promise.resolve(beforeSend(() => !done && stillCurrent())).then(allowed => allowed === true ? click() : finish(false, 'send_authorization_refused'), () => finish(false, 'send_authorization_failed')); }
+          catch { finish(false, 'send_authorization_failed'); }
         };
 
         observer = new MutationObserver(check);
@@ -2224,11 +2259,11 @@ var CLF_DOM = (() => {
         if (observeEvidence) unsubscribeEvidence = observeEvidence(check);
         // Readiness and acceptance share one deadline below the app's command lease.
         const timeout = Number.isFinite(acceptanceTimeoutMs) ? Math.max(1, Math.min(30000, acceptanceTimeoutMs)) : 30000;
-        timer = setTimeout(() => { if (attempted) check(); if (!attempted || !acceptUserReceipt) finish(false); }, timeout);
+        timer = setTimeout(() => { if (attempted) check(); if (!attempted || !acceptUserReceipt) finish(false, 'send_readiness_timeout'); }, timeout);
         check();
       });
     } catch {
-      return false;
+      return refused('send_exception');
     }
   }
 

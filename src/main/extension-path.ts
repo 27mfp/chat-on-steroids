@@ -25,6 +25,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
+import { forkInstanceEnabled } from './fork-instance.js';
 
 const MATERIALIZED_FINGERPRINT = '.chat-on-steroids-source';
 
@@ -160,6 +161,12 @@ function materializePackagedExtension(bundled: string, stable: string): string |
  * extension folder — so the checkout path is what answers there.
  */
 export function extensionDir(): string | null {
+  // The local fork launcher supplies a separately named companion restricted to its own
+  // bridge port. Never direct its Setup UI to the original extension source folder.
+  if (forkInstanceEnabled()) {
+    const isolated = process.env.COS_FORK_EXTENSION_DIR;
+    return isolated && validExtension(isolated) ? isolated : null;
+  }
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, 'extension');
     const stable = path.join(app.getPath('userData'), 'extension');

@@ -82,6 +82,7 @@ import {
   unpair
 } from './bridge.js';
 import { extensionDir } from './extension-path.js';
+import { forkInstanceEnabled } from './fork-instance.js';
 import { extensionDownloadUrl } from './version.js';
 import {
   deleteSession,
@@ -1084,6 +1085,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('bridge:diagnostics', async () => companionDiagnostics());
 
   handle('bridge:downloadExtension', async () => {
+    if (forkInstanceEnabled()) {
+      throw new Error('This local fork has no extension ZIP. Use Open extension folder and load the fork companion in its separate browser profile.');
+    }
     // This is a recovery path for the extension bundled with *this installed app*. Never use
     // releases/latest here: an old app must not fetch a newer extension with a newer protocol.
     await shell.openExternal(extensionDownloadUrl(app.getVersion()));

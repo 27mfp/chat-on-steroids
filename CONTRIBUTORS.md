@@ -207,6 +207,21 @@ Contributions also include reproductions, independent testing, designs and patch
 
 This is a growing attribution record, not a complete list of everyone who has helped. The [PR history](https://github.com/totec448-spec/chat-on-steroids/pulls?q=is%3Apr) and [issue history](https://github.com/totec448-spec/chat-on-steroids/issues?q=is%3Aissue) retain other submissions and discussions. Acknowledging a proposal here does not claim it was merged.
 
+## Fork integration, 26 September 2026
+
+The fork incorporates [@Maximapple](https://github.com/Maximapple)'s original commits for
+split stream request attribution [#414](https://github.com/totec448-spec/chat-on-steroids/pull/414),
+escaped prompt-frame readback [#401](https://github.com/totec448-spec/chat-on-steroids/pull/401),
+translated Stop control [#405](https://github.com/totec448-spec/chat-on-steroids/pull/405),
+and translated Send control [#418](https://github.com/totec448-spec/chat-on-steroids/pull/418).
+The merge history preserves the authored commits. The fork also incorporates
+[@27mfp](https://github.com/27mfp)'s current-composer delivery
+([fork #1](https://github.com/27mfp/chat-on-steroids/pull/1)), unseen completion indicator
+([fork #3](https://github.com/27mfp/chat-on-steroids/pull/3), originating in
+[upstream #373](https://github.com/totec448-spec/chat-on-steroids/pull/373)), and European
+Portuguese localization [#385](https://github.com/totec448-spec/chat-on-steroids/pull/385).
+The French catalog came from the reviewed upstream merge [#372](https://github.com/totec448-spec/chat-on-steroids/pull/372).
+
 ## Preserving credit
 
 Keep original authorship when merging a contribution. When adapting or consolidating contributed work, name the original author and PR, and preserve appropriate `Co-authored-by` trailers using the contributor's public GitHub noreply identity. Reports and review deserve explicit acknowledgment without inventing code authorship. See [CONTRIBUTING.md](CONTRIBUTING.md#credit-and-attribution).

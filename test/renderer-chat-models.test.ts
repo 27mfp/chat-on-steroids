@@ -105,6 +105,7 @@ it('excludes GPT-5.5 from the composer slider without excluding future observed 
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
   const models = [
     { id: 'old', label: 'GPT-5.5', efforts: ['medium', 'high', 'pro'] },
+    { id: 'old-short', label: '5.5', efforts: ['medium', 'high'] },
     { id: 'sol', label: 'GPT-5.6 Sol', efforts: ['medium', 'high'] },
     { id: 'future', label: 'GPT-7', efforts: ['high'] }
   ];

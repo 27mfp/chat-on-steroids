@@ -110,7 +110,7 @@ export function fitSessionPrompt(text: string, core: string, agents: ProjectInst
 }
 
 /** Opening normal/worker messages only. Callers own first-message eligibility;
- * follow-ups, helpers, handoff requests and resumed bootstraps never call this. */
+ * follow-ups, helpers and handoff requests never call this. */
 export async function prepareSessionPrompt(text: string, scope: PromptScope = {}, budget = limits, authored = text): Promise<string> {
   const folder = await promptFolder(scope);
   const skillScope = { projectPath: folder?.real ?? null };
@@ -121,6 +121,35 @@ export async function prepareSessionPrompt(text: string, scope: PromptScope = {}
   const agents = await projectInstructions(scope);
   if ((await promptFolder(scope))?.real !== folder?.real) throw new Error('The selected project changed during Skill preparation');
   return fitSessionPrompt(text, core, agents, budget, skills);
+}
+
+/**
+ * First message of a Compact & Resume destination.
+ *
+ * A resume is a brand-new ChatGPT conversation, so it needs the same current executor/Core and
+ * durable project context as any other fresh chat. The handoff itself is generated model text,
+ * though, not a new authored request: never infer selected Skills from words inside that brief.
+ */
+export async function prepareResumePrompt(text: string, scope: PromptScope, budget = limits): Promise<string> {
+  return prepareSessionPrompt(text, scope, budget, '');
+}
+
+/**
+ * Maximum authored resume-bootstrap characters that fit beside mandatory Core + project identity.
+ * AGENTS.md body text is deliberately excluded here: fitSessionPrompt will spend whatever space
+ * remains on it after the handoff, but a saved handoff must never depend on optional context being
+ * present in order to fit the browser's 96k message ceiling.
+ */
+export async function resumePromptAuthoredCharBudget(scope: PromptScope): Promise<number> {
+  const folder = await promptFolder(scope);
+  const skillScope = { projectPath: folder?.real ?? null };
+  const library = await listSkillLibrary(skillScope);
+  const core = await currentCoreInstructions(library);
+  const agents = await projectInstructions(scope);
+  if ((await promptFolder(scope))?.real !== folder?.real) throw new Error('The selected project changed during resume preparation');
+  const mandatoryAgents = agents ? { directory: agents.directory, text: '', truncated: false } : null;
+  const mandatory = fitSessionPrompt('', core, mandatoryAgents, limits, []);
+  return Math.max(0, MAX_CHATGPT_MESSAGE_CHARS - mandatory.length);
 }
 
 /** Explicit follow-up selection adds Skills only, never repeats opening setup. */

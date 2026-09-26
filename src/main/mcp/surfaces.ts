@@ -25,6 +25,7 @@ import type { Capabilities } from '../../shared/types.js';
 import { desktopAutomationSupported } from '../platform.js';
 import { WINDOWS_COMPUTER_METHODS, WINDOWS_COMPUTER_READ_METHODS, WINDOWS_COMPUTER_INPUT_METHODS } from '../../shared/windows-computer.js';
 import { BROWSER_TOOLS, BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../../shared/browser-control.js';
+import { forkInstanceEnabled } from '../fork-instance.js';
 
 export const SURFACE_IDS = ['core', 'desktop', 'plugins'] as const;
 export type SurfaceId = (typeof SURFACE_IDS)[number];
@@ -150,7 +151,8 @@ export const SURFACES: Record<SurfaceId, SurfaceDefinition> = { core: CORE, desk
 export const SURFACE_LIST: readonly SurfaceDefinition[] = [CORE, DESKTOP, PLUGINS];
 
 export function surfaceDefinition(id: SurfaceId): SurfaceDefinition {
-  return SURFACES[id];
+  const surface = SURFACES[id];
+  return forkInstanceEnabled() ? { ...surface, connectorName: surface.connectorName.replace(CONNECTOR_BRAND, `${CONNECTOR_BRAND} Fork`) } : surface;
 }
 
 /** Platform/capability projection used by setup; each registrar enforces the same split. */

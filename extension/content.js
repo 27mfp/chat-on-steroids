@@ -769,7 +769,11 @@
     // A marker-only escape must not consume literal path/glob backslashes in the brief.
     if (actualMarker && expectedMarker && actualMarker[1] === expectedMarker[1] && actualMarker[2] === expectedMarker[2] &&
         sendText(source.text.slice(actualMarker[0].length)) === sendText(expected.slice(expectedMarker[0].length))) return true;
-    return sendText(unescapeMarkdown(source.text)) === sendText(expected);
+    // ChatGPT also inserts a backslash before a hard line break. A first-message
+    // COS_CONTEXT frame contains many such breaks, so punctuation alone is not enough.
+    const typed = unescapeMarkdown(source.text.replace(/\\\n/g, '\n'));
+    return sendText(typed) === sendText(expected) ||
+      sendText(typed.replace(/&#x20;/gi, ' ')) === sendText(expected);
   }
   // A first fresh route may await authored evidence. A second route (including an
   // observed return to New Chat) revokes this send; text proof is not its lifetime.
@@ -793,8 +797,8 @@
     };
   }
   function sendSubmittedText(stillCurrent, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null,
-                             matchesUser = matchesSubmittedUser) {
-    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser,
+                             matchesUser = matchesSubmittedUser, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null) {
+    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser, onSendAttempt, onNoSend, acceptEditorRemount,
       observeEvidence: check => { pageViewChecks.add(check); return () => pageViewChecks.delete(check); } });
   }
   const GOAL_MARKER_INSTRUCTION = '\n\nFor this Goal session only: at the end of each final reply, write exactly one separate last line: [[COS_GOAL:COMPLETE]] if the entire requested task is finished, or [[COS_GOAL:CONTINUE]] if requested work remains. Do not claim completion for partial work. If user input is required, explain it and omit both markers.';
@@ -806,9 +810,11 @@
       receipt.accepted.conversationId === current && receipt.accepted.epoch === epoch;
     const attachmentsMatch = receipt.text || (receipt.attachmentNames?.length &&
       JSON.stringify(receipt.attachmentNames) === JSON.stringify((userMessageSource(message)?.attachments || []).map(file => file.name).sort()));
+    const framedBootstrap = typeof receipt.text === 'string' && CLF_DOM.userPromptText(receipt.text) !== null;
     return (!receipt.conversationId || receipt.conversationId === current) &&
       (!receipt.previousMessageId || receipt.previousMessageId !== message.id) && !!attachmentsMatch &&
-      (acceptedIdentity || matchesSubmittedUser(message, receipt.text));
+      (acceptedIdentity || (framedBootstrap
+        ? matchesSubmittedBootstrap(message, receipt.text) : matchesSubmittedUser(message, receipt.text)));
   }
 
   function rememberUserSend() {
@@ -8521,8 +8527,10 @@
         box.getAttribute('aria-disabled') !== 'true' ? box : null;
     };
     const expectedQuestionId = stoppedQuestionId || policyData.recordedQuestionId || null;
-    const sourceReady = () => editableSource() && (!expectedQuestionId ||
-      CLF_DOM.messages().filter(message => message.role === 'user').at(-1)?.id === expectedQuestionId);
+    const sourceReady = () => {
+      const questionId = CLF_DOM.messages().filter(message => message.role === 'user').at(-1)?.id;
+      return editableSource() && !!questionId && (!expectedQuestionId || questionId === expectedQuestionId);
+    };
     if (!sourceReady()) {
       const hydrationCurrent = () => current() && userSendReceipt === initialSendReceipt &&
         (!stoppedQuestionId || (CLF_DOM.messages().filter(message => message.role === 'user').at(-1)?.id ?? null) === stoppedQuestionId) &&
@@ -8605,7 +8613,12 @@
       void pullActivity();
       return;
     }
-    await runNativeCompaction(String(data.prompt), String(data.token || ''), forId, forEpoch, forRun, sameTurn);
+    // Stop can retire the generation's local turnId after the barrier. The authored
+    // question, not that ephemeral generation handle, owns this new handoff Send.
+    const sameSourceQuestion = () =>
+      CLF_DOM.messages().filter(message => message.role === 'user').at(-1)?.id === stoppedQuestionId &&
+      !CLF_DOM.generating();
+    await runNativeCompaction(String(data.prompt), String(data.token || ''), forId, forEpoch, forRun, sameSourceQuestion);
   }
 
   /**
@@ -8779,6 +8792,12 @@
       epoch === forEpoch &&
       CLF_DOM.conversationId() === forId;
     let attemptCrossed = false;
+    let draftTouched = false;
+    // execCommand itself can emit a trusted input event after the call returns, and React
+    // may mirror that edit into a replacement host. Only direct user initiators revoke the
+    // remount wait; exact draft equality below still rejects any changed text.
+    const draftEvents = ['keydown', 'pointerdown', 'paste', 'drop'];
+    const onDraftInteraction = event => { if (event.isTrusted) draftTouched = true; };
     const automaticTicket = job && job.automatic === true;
     const abandonBeforeSend = async (why, retireAutomatic = false) => {
       if (!current()) return;
@@ -8842,16 +8861,26 @@
           occupiedByOtherDraft
         ));
       }
+      // A just-opened source can replace its editing host during hydration after the native
+      // insertion. The same exact marked draft may reappear in the new host; wait for that
+      // existing page-owned fact before claiming the send. Any user interaction revokes it.
+      for (const name of draftEvents) document.addEventListener(name, onDraftInteraction, true);
       await Promise.resolve();
       if (!current()) return;
       if (!sameSource()) {
         CLF_DOM.clearPromptExact(prompt);
         return void (await abandonBeforeSend('The chat changed while preparing the handoff. Nothing was sent.', true));
       }
-      const composer = CLF_DOM.composer();
-      if (!composer || squeeze(composerDraft(composer)) !== squeeze(prompt)) {
+      const ownDraft = () => {
+        const box = editable();
+        return box && squeeze(composerDraft(box)) === squeeze(prompt) ? box : null;
+      };
+      const composer = ownDraft() || await waitPageView(ownDraft,
+        () => current() && sameSource() && !draftTouched, INTERRUPT_WAIT_MS);
+      if (!composer || draftTouched) {
+        const reason = draftTouched ? 'user interaction' : !sameSource() ? 'source turn changed' : 'exact draft unavailable';
         return void (await abandonBeforeSend(
-          'The message box changed before the handoff instruction could be sent. Its draft was preserved; nothing was compacted.'
+          `The handoff instruction was not sent because ${reason}. Its draft was preserved; nothing was compacted.`
         ));
       }
       // Claiming the prompt. Nothing has been submitted under this state, and the app knows
@@ -8868,13 +8897,16 @@
         renderControl();
         return;
       }
-      if (!sameSource() || CLF_DOM.composer() !== composer || squeeze(composerDraft(composer)) !== squeeze(prompt)) {
+      const claimedComposer = ownDraft() || await waitPageView(ownDraft,
+        () => current() && sameSource() && !draftTouched, INTERRUPT_WAIT_MS);
+      if (draftTouched || !sameSource() || !claimedComposer) {
+        const reason = draftTouched ? 'user interaction' : !sameSource() ? 'source turn changed' : 'exact draft unavailable';
         CLF_DOM.clearPromptExact(prompt);
-        return void (await abandonBeforeSend('The message box changed before the handoff could be sent. Its draft was preserved.', true));
+        return void (await abandonBeforeSend(`The handoff was not sent because ${reason}. Its draft was preserved.`, true));
       }
       rememberUserSend();
-      const sent = await sendSubmittedText(current, true, async stillSending => {
-        if (!stillSending() || !current() || !sameSource()) return false;
+      const sent = await sendSubmittedText(() => current() && !draftTouched, true, async stillSending => {
+        if (!stillSending() || !current() || !sameSource() || draftTouched) return false;
         // Native Send readiness precedes this irreversible checkpoint. A disabled
         // button timing out is still a provably unsent request. Once dispatched,
         // a missing reply retains custody rather than granting another click.
@@ -8885,7 +8917,7 @@
           localError = 'Nothing was submitted here: the handoff send permission was not confirmed. The existing request will not be sent twice.';
           return false;
         }
-        return stillSending() && sameSource();
+        return stillSending() && sameSource() && !draftTouched;
       });
       if (!current()) return;
       if (!sent) {
@@ -8913,6 +8945,7 @@
         renderControl();
       }
     } finally {
+      for (const name of draftEvents) document.removeEventListener(name, onDraftInteraction, true);
       // Cancelled while this was composing. Nothing was armed, so nothing was sent — but the
       // instruction may already be sitting in the composer, and leaving a wall of handoff
       // machinery in somebody's message box is not what pressing Cancel asked for.
@@ -10392,18 +10425,26 @@
       return void (await fail(`ChatGPT refused the inserted text${insertionFailure ? ` (${insertionFailure})` : ''}`));
     }
     const sendingBootstrap = submittedSendLifetime(target);
+    let bootstrapTouched = false;
+    const bootstrapInteractionEvents = ['keydown', 'pointerdown', 'paste', 'drop'];
+    const noteBootstrapInteraction = event => { if (event.isTrusted) bootstrapTouched = true; };
+    if (boot.type === 'resume') for (const name of bootstrapInteractionEvents)
+      document.addEventListener(name, noteBootstrapInteraction, true);
     // Stop/composer-clear may acknowledge acceptance before the authored row mounts.
     // Keep the original draft lease through that receipt, exactly as desktop delivery does;
     // identical text alone must never erase a later trusted edit or a replacement editor.
     const bootstrapDraft = CLF_DOM.captureComposerDraft(boot.text, () => !attempt?.cancelled && sendingBootstrap());
     const priorBootstrapUser = CLF_DOM.messages().filter(message => message.role === 'user').at(-1)?.id;
     const clearAcknowledgedBootstrap = async acknowledged => {
-      if (acknowledged?.ok !== true || acknowledged.data?.ok === false || !bootstrapDraft.current()) return;
+      if (acknowledged?.ok !== true || acknowledged.data?.ok === false) return;
       const receipt = await waitPageView(() => {
         const latest = CLF_DOM.messages().filter(message => message.role === 'user').at(-1);
         return latest?.id !== priorBootstrapUser && matchesSubmittedBootstrap(latest, boot.text);
       }, () => !attempt?.cancelled && sendingBootstrap(), 15000);
-      if (receipt) await bootstrapDraft.clear();
+      if (receipt) {
+        if (bootstrapDraft.current()) await bootstrapDraft.clear();
+        else if (boot.type === 'resume' && !bootstrapTouched && sendingBootstrap()) CLF_DOM.clearPromptExact(boot.text);
+      }
     };
     try {
     // Give synchronous React/input work one microtask turn to replace the editing host, then
@@ -10436,13 +10477,24 @@
     const resumeMarker = boot.type === 'resume' ? String(boot.text || '').match(CONTINUATION_MARKER) : null;
     // The last custody writes await HTTP. They cannot preserve the composer or SPA route
     // that was checked above; prove both again after each write and at the native click.
+    let unsentResumeReleased = false;
+    const releaseUnsentResume = async () => {
+      if (boot.type !== 'resume' || !resumeMarker) return false;
+      const released = await ask({
+        type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationLost: true
+      });
+      if (!released || released.ok !== true || released.data?.released !== true) return false;
+      unsentResumeReleased = true;
+      continuationJournalPending = false;
+      CLF_DOM.clearPromptExact(boot.text);
+      return true;
+    };
     const exactBootstrapDraft = () => squeeze(composerDraft()) === expectedText;
     const rejectChangedBootstrap = async () => {
       if (await failIfRetargeted()) return true;
       if (exactBootstrapDraft()) return false;
       if (boot.type === 'resume' && !squeeze(composerDraft())) {
-        continuationJournalPending = false;
-        await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationLost: true });
+        await releaseUnsentResume();
         return true;
       }
       await fail('the composer changed during bootstrap authorization; the draft was preserved and nothing was sent');
@@ -10468,40 +10520,53 @@
       }
       return found;
     };
-    if (boot.type === 'resume') {
-      if (!resumeMarker || resumeMarker[1] !== 'RESUME') {
-        return void (await fail('the resume bootstrap had no valid continuation marker'));
-      }
-      continuationJournalPending = true;
-      const permit = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationAttempt: true });
-      if (await rejectChangedBootstrap()) return;
-      if (!permit || permit.ok !== true || !permit.data || permit.data.allowed !== true) {
-        await bootstrapDraft.clear();
-        return;
-      }
-      // As on the source side: the claim above promises nothing was submitted, and this second
-      // write is the exclusive cut taken immediately before the click.
-      const armed = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationDispatch: true });
-      if (await rejectChangedBootstrap()) return;
-      if (!armed || armed.ok !== true || !armed.data || armed.data.armed !== true) {
-        await bootstrapDraft.clear();
-        return;
-      }
-    }
     if (!stillOnTarget() || !exactBootstrapDraft()) { await rejectChangedBootstrap(); return; }
     // The destination Resume prompt is the first authored evidence in a brand-new chat.
     // Record it before send() clicks so reportMessages can open B's turn immediately instead
     // of waiting until Fiber eventually exposes the first connector request.
     rememberUserSend();
+    let nativeSendAttempted = false;
+    let noSendReason = 'unknown';
+    const authorizeBootstrapSend = boot.type === 'resume' ? async sendCurrent => {
+      if (!resumeMarker || resumeMarker[1] !== 'RESUME') {
+        await fail('the resume bootstrap had no valid continuation marker');
+        return false;
+      }
+      if (!sendCurrent() || await rejectChangedBootstrap()) return false;
+      continuationJournalPending = true;
+      const permit = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationAttempt: true });
+      if (!sendCurrent() || await rejectChangedBootstrap()) return false;
+      if (!permit || permit.ok !== true || !permit.data || permit.data.allowed !== true) {
+        await bootstrapDraft.clear();
+        return false;
+      }
+      // Take the durable dispatch cut only once native Send is actually enabled. CLF_DOM.send
+      // re-proves the exact editor, route and Send control after this await before button.click().
+      const armed = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationDispatch: true });
+      if (!armed || armed.ok !== true || !armed.data || armed.data.armed !== true) {
+        await bootstrapDraft.clear();
+        return false;
+      }
+      if (!sendCurrent() || await rejectChangedBootstrap()) return false;
+      return true;
+    } : null;
     // The bootstrap's own receipt, which allows for the composer's Markdown escaping — see
     // matchesSubmittedBootstrap. Every other caller keeps the exact comparison.
-    if (!(await sendSubmittedText(() => !attempt?.cancelled && sendingBootstrap(), false, null, null,
-                                  matchesSubmittedBootstrap))) {
-      // Once send() was invoked, a missing/cleared draft cannot prove that no click
-      // happened. Only the exact pre-click check above may release the dispatch.
+    if (!(await sendSubmittedText(() => !attempt?.cancelled && !bootstrapTouched && sendingBootstrap(), false, authorizeBootstrapSend, null,
+                                  matchesSubmittedBootstrap, () => { nativeSendAttempted = true; },
+                                  reason => { noSendReason = reason; },
+                                  boot.type === 'resume' ? () => !bootstrapTouched && stillOnTarget() && exactBootstrapDraft() : null))) {
       if (boot.type === 'resume') {
-        // Retain the armed ticket and journal gate for exact marker reconciliation; never
-        // replay an ambiguous click or let ordinary events create its shadow session.
+        // A pre-click failure proves no provider send occurred. Release the durable dispatch
+        // through the continuation owner so the source session is never stranded in
+        // dispatched-unresolved. The bridge retires this exact failed replacement instead of
+        // replaying an ambiguous click.
+        if (!nativeSendAttempted) {
+          const released = unsentResumeReleased || await releaseUnsentResume();
+          if (!released) await fail(`ChatGPT did not reach native Send (${noSendReason}); the resume brief was not submitted`);
+        }
+        // After a native click, retain the armed ticket and journal gate for exact marker
+        // reconciliation; never replay an ambiguous Send.
         return;
       }
       return void (await fail('ChatGPT did not accept the bootstrap send'));
@@ -10551,7 +10616,11 @@
     publishBootstrapSelection(found);
     const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: found, agent, client: RUN_ID });
     await clearAcknowledgedBootstrap(acknowledged);
-    } finally { bootstrapDraft.dispose(); }
+    } finally {
+      bootstrapDraft.dispose();
+      if (boot.type === 'resume') for (const name of bootstrapInteractionEvents)
+        document.removeEventListener(name, noteBootstrapInteraction, true);
+    }
   }
 
   // ----------------------------------------------------------------- start
@@ -11040,6 +11109,7 @@
       const previousUserId = CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id;
       rememberUserSend();
       const submittedText = sendText(composerDraft());
+      const matchesInputUser = input.opening ? matchesSubmittedBootstrap : matchesSubmittedUser;
       if (input.purpose === 'decision') {
         decision = { id: input.id, owner: input.owner, messageId: null, text: input.text, temporary, onTarget: sendingTarget, conversationId: null, epoch: forEpoch, response: '', publishing: false };
         desktopDecision = decision;
@@ -11058,12 +11128,12 @@
       }, (user, conversation) => {
         if ((!conversation && !temporary) || (target && !onTarget())) return false;
         const users = CLF_DOM.messages().filter(row => row.role === 'user');
-        if ((!target && users.length !== 1) || users.at(-1)?.id !== user.id || user.id === previousUserId || !matchesSubmittedUser(user, submittedText)) return false;
+        if ((!target && users.length !== 1) || users.at(-1)?.id !== user.id || user.id === previousUserId || !matchesInputUser(user, input.text)) return false;
         // Freeze only identity while native Send still holds the proven row. React
         // may replace it before this async operation resumes; do not rediscover it.
         receipt = { conversation, user: { id: user.id } };
         return true;
-      }))) return false;
+      }, matchesInputUser))) return false;
       if (!receipt || !sendingTarget()) return false;
       // Native Send listeners refresh the receipt; pin only that witnessed object.
       const witnessedSendReceipt = userSendReceipt;

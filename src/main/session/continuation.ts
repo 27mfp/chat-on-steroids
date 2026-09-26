@@ -959,16 +959,23 @@ export async function dispatchContinuationDestinationSendNow(token: string): Pro
       ...current,
       destinationSend: { state: 'dispatched-unresolved', conversationId: null, messageId: null }
     }));
+    // Redeem can happen long before a hidden/new ChatGPT tab is finally ready to click Send.
+    // Refresh the no-shadow recorder gate at the irreversible dispatch boundary so the full
+    // claim window starts when B can actually begin to exist, rather than when its page first
+    // took custody of the handoff. Without this, a slow destination can outlive the 60s gate;
+    // its first tool/event then creates a shadow session milliseconds before the A->B commit.
+    noteResumeClaim(entry.token);
     return true;
   });
 }
 
 /**
- * Takes an armed replacement dispatch back, on the one proof that nothing left the page: the
- * composer no longer held the brief in a chat that still had no id, so the click had nothing
- * to submit and ChatGPT nothing to accept. The user pressing Escape as the brief lands is that
- * case. A composer still holding the text is the ambiguous one and stays armed; only the marked
- * message or a cancel resolves it. Released, the brief may be offered to a fresh chat again.
+ * Takes an armed replacement dispatch back only on page-owned proof that no native Send click
+ * happened. The classic proof is an emptied composer in an id-less chat (Escape as the brief
+ * lands); the Send helper can also prove that React invalidated the editor/control after the
+ * durable dispatch write but before it ever reached `button.click()`. Once the native click
+ * boundary was reached, a missing receipt is ambiguous and stays armed; only the marked message
+ * or a cancel resolves it. Released, the brief may be offered to a fresh chat again.
  */
 export function continuationClaimedBy(token: string, claimant: string): boolean {
   return byToken.get(token)?.claimedBy === claimant;

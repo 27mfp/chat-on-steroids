@@ -79,10 +79,14 @@ import {
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
 import { editContextMenuTemplate } from './edit-context-menu.js';
+import { prepareForkInstance } from './fork-instance.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
 const RETIRED_WORKERS_STATE = 'retired-workers';
+// This must precede the single-instance lock: on Linux its scope follows userData.
+const forkInstance = prepareForkInstance(app);
+const appTitle = forkInstance ? 'Chat On Steroids Fork' : 'Chat On Steroids';
 
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -117,7 +121,7 @@ function createWindow(): void {
     } : {}),
     // Painted before the renderer loads, so a dark window never flashes white.
     backgroundColor: windowBackgroundForTheme(getConfig().ui.theme, getConfig().ui.appearance),
-    title: 'Chat On Steroids',
+    title: appTitle,
     webPreferences: {
       zoomFactor: UI_BASE_ZOOM,
       preload: path.join(__dirname, '../preload/index.js'),
@@ -266,7 +270,7 @@ function refreshTray(): void {
   const running = connected || offline;
   const label = connected ? 'Connected' : offline ? 'No internet' : 'Not connected';
   tray.setImage(trayIcon(running));
-  tray.setToolTip(`Chat On Steroids — ${label.toLowerCase()}`);
+  tray.setToolTip(`${appTitle} — ${label.toLowerCase()}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label, enabled: false },
@@ -454,7 +458,9 @@ void app.whenReady().then(async () => {
   // window that is already on screen. Everything it learns arrives through the ordinary state
   // push, every failure ends inside it, and its own timer keeps it running for a tray app that
   // is never restarted.
-  startUpdateChecks();
+  // A local fork has no release feed of its own. Never offer an upstream installer
+  // that could replace the user's original installation.
+  if (!forkInstance) startUpdateChecks();
   // Warm the existing derived cache once, after startup, without delaying the UI.
   // A visit to Usage joins this same calculation; unchanged recordings cost no reads.
   void usageOverview(usageWarmup.signal).catch((error: Error) => {

@@ -14,8 +14,9 @@ import { continuationMarkerOf, unescapeMarkdown } from '../../shared/session.js'
 import { logInfo } from '../logger.js';
 import { getSession, readSessionPlan, saveHandoff } from './store.js';
 import { destinationContinuationMarker } from './handoff-prompt.js';
-import { MAX_CHATGPT_MESSAGE_CHARS, userPromptText } from '../../shared/user-prompt.js';
+import { userPromptText } from '../../shared/user-prompt.js';
 import type { AgentPlan } from '../../shared/agent-plan.js';
+import { resumePromptAuthoredCharBudget } from './prompt.js';
 
 export interface PrepareHandoffInput {
   sessionId: string;
@@ -160,8 +161,13 @@ export async function prepareHandoff(input: PrepareHandoffInput): Promise<Handof
   // Freeze the actual saved plan with the brief. A pointer to the removed session
   // tool cannot supply it to the replacement model. Budget this same snapshot once.
   const planNotice = handoffPlanNotice(await readSessionPlan(input.sessionId));
+  const authoredBudget = await resumePromptAuthoredCharBudget({ sessionId: input.sessionId });
   const overhead = resumeBootstrapText('', input.continuationToken).length + planNotice.length;
-  text = boundBrief(text, MAX_CHATGPT_MESSAGE_CHARS - overhead);
+  const briefBudget = authoredBudget - overhead;
+  if (briefBudget < MIN_BRIEF_CHARS) {
+    throw new Error('The current Core/project instructions leave too little room for a continuation handoff.');
+  }
+  text = boundBrief(text, briefBudget);
   // Checked again here, and not only at the bridge route that can word the refusal well,
   // because this is the one function that writes a handoff to disk. A stub that reaches the
   // store is indistinguishable from a real brief for the rest of its life.
