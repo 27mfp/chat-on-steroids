@@ -11,8 +11,10 @@
  *     data-message-author-role, data-interrupted, data-testid)
  *   · `.markdown` for assistant prose when the current renderer supplies no assistant
  *     data-message-id; progress markdown under data-interrupted is excluded
- *   · the id #prompt-textarea on the composer, and the send/stop/dictation buttons beside
- *     it, which is where our own composer control is anchored
+ *   · the composer editor: #prompt-textarea, the shell textbox inside
+ *     form[data-chatgpt-composer], or #pending-conversation-input / the visible
+ *     "Ask ChatGPT" field when the classic id is gone. Send, stop and dictation
+ *     sit beside that editor, which is where our own composer control is anchored
  *   · one structural tool-message class substring, plus a display-contents row shape that
  *     is confirmed structurally (short header line, no prose) before it is believed
  *
@@ -656,13 +658,13 @@ var CLF_DOM = (() => {
     // Keep the same text comparison used by send receipts; editor identity and
     // trusted edits still revoke the lease even when a user only changes spacing.
     const compact = text => String(text || '').replace(/\s+/g, '');
-    const insertedText = compact(box?.textContent);
+    const insertedText = compact(composerText(box));
     let touched = false;
     let files = [];
     const events = ['input', 'change', 'keydown', 'pointerdown', 'paste', 'drop'];
     const changed = event => { if (event.isTrusted) touched = true; };
     for (const name of events) host?.addEventListener(name, changed, true);
-    const same = () => !touched && stillCurrent() && composer() === box && box?.isConnected && compact(box.textContent) === insertedText;
+    const same = () => !touched && stillCurrent() && composer() === box && box?.isConnected && compact(composerText(box)) === insertedText;
     const ownsAttachments = () => {
       if (!same() || !host) return false;
       const current = [...host.querySelectorAll('button[aria-label]')].filter(node => composerFileName(node));
@@ -1529,14 +1531,65 @@ var CLF_DOM = (() => {
     }, []);
   }
 
+  function mountedComposer(node) {
+    return !!node?.isConnected &&
+      !node.closest(`${OWN_SURFACES},[data-turn-key],.markdown,[hidden],[aria-hidden="true"],[inert]`);
+  }
+
+  function shownComposer(node) {
+    return mountedComposer(node) && node.getClientRects().length > 0;
+  }
+
+  function onlyComposer(nodes) {
+    return nodes.length === 1 ? nodes[0] : null;
+  }
+
+  function labelledAsk(node) {
+    return /ask chatgpt/i.test(`${node.getAttribute('aria-label') || ''} ${node.getAttribute('data-placeholder') || ''} ${node.getAttribute('placeholder') || ''}`);
+  }
+
   function composer() {
     return safe(() => {
       const classic = document.querySelector('#prompt-textarea');
-      if (classic) return classic;
-      const candidates = [...document.querySelectorAll('form[data-chatgpt-composer] [contenteditable="true"][role="textbox"]')]
-        .filter(node => !node.closest(`${OWN_SURFACES},[data-turn-key],.markdown,[hidden],[aria-hidden="true"],[inert]`));
-      return candidates.length === 1 ? candidates[0] : null;
+      if (shownComposer(classic)) return classic;
+      const shell = [...document.querySelectorAll('form[data-chatgpt-composer] [contenteditable="true"][role="textbox"]')];
+      const visibleShell = onlyComposer(shell.filter(shownComposer));
+      if (visibleShell) return visibleShell;
+      // September 2026 business composer: #prompt-textarea is gone. The live field is
+      // one visible contenteditable labelled "Ask ChatGPT", or #pending-conversation-input
+      // while that rich editor is hidden.
+      const ask = onlyComposer([...document.querySelectorAll('[contenteditable="true"]')].filter(node =>
+        shownComposer(node) && labelledAsk(node)));
+      if (ask) return ask;
+      const pending = document.querySelector('#pending-conversation-input');
+      if (shownComposer(pending)) return pending;
+      const labelled = onlyComposer([...document.querySelectorAll('textarea, input:not([type="hidden"])')].filter(node =>
+        shownComposer(node) && labelledAsk(node)));
+      if (labelled) return labelled;
+      // The shell editor is real before layout gives it client rects. A visible
+      // pending field above already had its chance to win.
+      const mountedShell = onlyComposer(shell.filter(mountedComposer));
+      if (mountedShell) return mountedShell;
+      return classic || null;
     }, null);
+  }
+
+  function plainComposer(node) {
+    return node?.tagName === 'TEXTAREA' || node?.tagName === 'INPUT';
+  }
+
+  /** Draft text. A textarea keeps the live value off textContent. */
+  function composerText(node) {
+    const box = node === undefined ? composer() : node;
+    if (!box) return '';
+    return plainComposer(box) ? String(box.value || '') : (box.textContent || '');
+  }
+
+  function writePlainComposer(box, next) {
+    const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(box), 'value');
+    if (descriptor?.set) descriptor.set.call(box, next);
+    else box.value = next;
+    box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: next }));
   }
 
   /**
@@ -1553,7 +1606,7 @@ var CLF_DOM = (() => {
       const box = composer();
       if (!composerWritable()) return false;
       if (generating() || stopButton()) return false;
-      if ((box.textContent || '').trim() !== '') return false;
+      if (composerText(box).trim() !== '') return false;
       return true;
     }, false);
   }
@@ -1971,6 +2024,18 @@ var CLF_DOM = (() => {
     };
     try {
       if (!box) return reject('composer_missing');
+      if (plainComposer(box)) {
+        const existingValue = String(box.value || '');
+        if (value === '' && mode !== true) return false;
+        if (existingValue.trim() !== '' && mode === false) return reject('existing_draft');
+        const next = mode === 'append' && existingValue.trim() ? `${existingValue}\n${value}` : value;
+        box.focus();
+        if (!box.isConnected || composer() !== box) return reject('editor_replaced');
+        if (document.activeElement !== box) return reject('composer_not_focused');
+        writePlainComposer(box, next);
+        if (box.value !== next) return reject('text_mismatch');
+        return true;
+      }
       const existing = (box.textContent || '').trim();
       if (value === '' && mode !== true) return false;
       if (existing !== '' && mode === false) return reject('existing_draft');
@@ -2022,7 +2087,14 @@ var CLF_DOM = (() => {
     return safe(() => {
       const box = composer();
       const compact = (text) => String(text || '').replace(/\s+/g, '');
-      if (!box || compact(box.textContent) !== compact(value)) return false;
+      if (!box) return false;
+      if (plainComposer(box)) {
+        if (compact(box.value) !== compact(value)) return false;
+        box.focus();
+        writePlainComposer(box, '');
+        return String(box.value || '').trim() === '';
+      }
+      if (compact(box.textContent) !== compact(value)) return false;
       box.focus();
       document.execCommand('selectAll', false);
       document.execCommand('delete', false);
@@ -2038,7 +2110,8 @@ var CLF_DOM = (() => {
       if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return false;
       // Rich editors use adjacent paragraphs for newlines; textContent concatenates
       // their words. Preserve those boundaries when matching the rendered user message.
-      const draftText = () => (typeof box.innerText === 'string' ? box.innerText : [...box.childNodes]
+      const draftText = () => plainComposer(box) ? String(box.value || '').trim()
+        : (typeof box.innerText === 'string' ? box.innerText : [...box.childNodes]
         .map((node) => (node.textContent || '') + (/^(P|DIV|BR)$/.test(node.nodeName) ? '\n' : '')).join('')).trim();
       const submitted = draftText();
       if (!submitted) return false;
@@ -2075,7 +2148,7 @@ var CLF_DOM = (() => {
         // or Stop alone cannot hand off a receipt, and a later DOM read can lose it.
         if (acceptUserReceipt || currentConversation !== beforeConversation) return false;
         const current = composer();
-        if (current === box && box.isConnected && (current.textContent || '').trim() === '') return true;
+        if (current === box && box.isConnected && (plainComposer(current) ? String(current.value || '') : current.textContent || '').trim() === '') return true;
         if (!beforeGenerating && generating()) return true;
         if (!beforeStop && stopButton()) return true;
         return false;
@@ -2503,8 +2576,15 @@ var CLF_DOM = (() => {
     if (!closed) failure('picker_close_failed');
     return restored && closed && stillCurrent() && result.size ? [...result.values()] : null;
   }
+  function legacyComposer(node = composer()) {
+    return !!node && (node.id === 'prompt-textarea' || !!node.closest('form[data-chatgpt-composer]'));
+  }
   async function selectModelSettings(model, effort, stillCurrent = () => true) {
     if (!model && !effort) return true;
+    // The September 2026 composer has no effort menu. Sending keeps the model
+    // already selected on that page. A classic or shell editor still waits for
+    // its picker to hydrate and refuses an unconfirmed change.
+    if (!legacyComposer() && !modelPickerTrigger()) return true;
     const ui = modelPickerAccess(stillCurrent), original = await ui.open();
     if (!original) { await ui.close(); return false; }
     let selected = false, closed = false;
@@ -2693,6 +2773,7 @@ var CLF_DOM = (() => {
     toolLabel,
     errors,
     composer,
+    composerText,
     composerSubmitReady,
     composerWritable,
     composerBox,

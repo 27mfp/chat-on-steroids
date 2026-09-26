@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const source = readFileSync(new URL('../extension/chatgpt-dom.js', import.meta.url), 'utf8');
 interface DomApi {
   insertPrompt(text: string, mode?: boolean | 'append', failure?: (reason: string) => void): boolean;
+  clearPromptExact(text: string): boolean;
+  composerText(node?: Element): string;
+  composerSubmitReady(): boolean;
   enterProject(entry: { id: string; sourceConversationId: string }, current?: () => boolean): Promise<boolean>;
   composerActions(): { host: HTMLElement; before: HTMLElement | null } | null;
   generating(): boolean;
@@ -724,5 +727,75 @@ describe('locale-independent provider composer evidence', () => {
     group.firstElementChild!.setAttribute('data-default-action', 'true');
     group.append(group.lastElementChild!.cloneNode(true));
     expect(api.hasComposerAttachments()).toBe(false);
+  });
+});
+
+describe('pending conversation composer', () => {
+  function pendingComposer() {
+    document.getElementById('prompt-textarea')!.remove();
+    document.querySelector('button[aria-haspopup="menu"]')!.remove();
+    const area = document.createElement('textarea');
+    area.id = 'pending-conversation-input';
+    area.setAttribute('aria-label', 'Ask ChatGPT');
+    document.body.append(area);
+    return area;
+  }
+
+  it('types into the pending textarea when the classic editor is gone', () => {
+    const area = pendingComposer();
+    expect(api.composerSubmitReady()).toBe(true);
+    expect(api.insertPrompt('hello\nthere', true)).toBe(true);
+    expect(area.value).toBe('hello\nthere');
+    expect(api.composerText()).toBe('hello\nthere');
+    expect(api.composerSubmitReady()).toBe(false);
+    expect(api.insertPrompt('next')).toBe(false);
+    expect(area.value).toBe('hello\nthere');
+    expect(api.clearPromptExact('hello\nthere')).toBe(true);
+    expect(area.value).toBe('');
+    expect(api.composerSubmitReady()).toBe(true);
+  });
+
+  it('sends on the page model when that composer has no legacy effort menu', async () => {
+    pendingComposer();
+    expect(await api.selectModelSettings('gpt-5-6-thinking', 'high')).toBe(true);
+  });
+
+  it('ignores a hidden duplicate and uses the visible pending field', () => {
+    const classic = document.getElementById('prompt-textarea')!;
+    classic.setAttribute('aria-hidden', 'true');
+    const hiddenAsk = document.createElement('div');
+    hiddenAsk.setAttribute('contenteditable', 'true');
+    hiddenAsk.setAttribute('aria-label', 'Ask ChatGPT');
+    hiddenAsk.setAttribute('aria-hidden', 'true');
+    hiddenAsk.textContent = 'stale editor';
+    const area = document.createElement('textarea');
+    area.id = 'pending-conversation-input';
+    area.setAttribute('aria-label', 'Ask ChatGPT');
+    document.body.append(hiddenAsk, area);
+    expect(api.insertPrompt('visible', true)).toBe(true);
+    expect(area.value).toBe('visible');
+    expect(api.composerText()).toBe('visible');
+    expect(classic.textContent).toBe('Exact app prompt');
+    expect(hiddenAsk.textContent).toBe('stale editor');
+  });
+
+  it('types into the visible Ask ChatGPT editor ahead of the pending placeholder', () => {
+    document.getElementById('prompt-textarea')!.remove();
+    const pending = document.createElement('textarea');
+    pending.id = 'pending-conversation-input';
+    pending.setAttribute('aria-label', 'Ask ChatGPT');
+    const editor = document.createElement('div');
+    editor.setAttribute('contenteditable', 'true');
+    editor.setAttribute('aria-label', 'Ask ChatGPT');
+    document.body.append(pending, editor);
+    document.execCommand = (command, _ui, value) => {
+      if (command !== 'insertHTML' || document.activeElement !== editor) return false;
+      editor.innerHTML = value || '';
+      return true;
+    };
+    expect(api.insertPrompt('oknow', true)).toBe(true);
+    expect(editor.textContent).toBe('oknow');
+    expect(api.composerText()).toBe('oknow');
+    expect(pending.value).toBe('');
   });
 });

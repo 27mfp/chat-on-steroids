@@ -1684,7 +1684,12 @@ The alternate shell uses an id-less editable textbox under `form[data-chatgpt-co
 `data-model-picker-view` for its portal. Its evaluated `powerSelections`, current selection and
 version options normalize into the same bounded picker snapshot. Mixed-version powers retain
 their execution ids rather than merging unrelated models into a synthetic Latest family.
-Ambiguous triggers and unrecognized state remain unknown. MAIN helper replacement removes the
+The September 2026 business composer can omit both `#prompt-textarea` and that effort menu.
+Its visible field is one contenteditable labelled "Ask ChatGPT", or `#pending-conversation-input`
+while that editor is hidden. A textarea draft is its value, not `textContent`. When that page
+has no legacy picker trigger, Send keeps the model already selected there. Classic
+`#prompt-textarea` and shell editors still wait for picker hydration and refuse an unconfirmed
+change. Ambiguous triggers and unrecognized state remain unknown. MAIN helper replacement removes the
 previous listener across protocol versions, because the picker/plugin reply protocols are shared.
 The matched recorder/MAIN helper version is 21. Shell exchanges are read only under the native
 main/thread anchors. Their `entry.turn.items` supply actual user/assistant ids, public text and
