@@ -15,7 +15,8 @@
 - 27 Compact & Resume tests, 308 config/session/renderer/pt-PT tests, and 259 fork-isolation, extension-path, desktop-input and DOM tests passed after PR #388 and adaptations.
 - `git diff --check` passed. The editable default is 4,988 characters, below its 20,000-character config limit.
 - The full `npm run verify` was stopped after it exposed missing pt-PT keys (fixed) and many `session-finish.test.ts` failures. One representative finish failure was reproduced unchanged in a detached worktree at the prior fork `HEAD` (`374ec02`), so it is not evidence that this sync caused it. A later complete gate is still needed; targeted passing suites do not replace it.
-- No new packaged payload or signed-in ChatGPT acceptance was claimed. The fork's rebuilt local bundle and prepared unpacked extension require reload in its separate browser profile before live behavior can be assessed.
+- `node scripts/prepare-fork-extension.mjs` refreshed only `outputs/fork-extension`; readback confirmed version 2.1.15, fork app identity and port 8769. The original `extension/background.js` retained its original identity and port list. The existing fork desktop entry still points at this checkout. A bounded 20-second `scripts/run-fork-local.sh` smoke stayed running until `timeout` ended it; no fork process or listener remained afterward. It logged Electron/Wayland warnings, so this proves startup only, not signed-in browser behavior.
+- No new packaged payload or signed-in ChatGPT acceptance was claimed. The prepared unpacked extension needs reload in the fork's separate browser profile before the changed browser flow can be assessed.
 
 ## PR review
 

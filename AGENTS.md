@@ -2264,8 +2264,8 @@ awaiting-summary -> awaiting-chat -> claimed -> committing -> committed
    requirement that the compaction reply contain only the brief remain code-owned invariants.
    The fork retains its detailed default for substantial sessions (roughly 10k–30k tokens
    when the material warrants it); shorter briefs are appropriate when there is less useful
-   state. Editing the content instructions cannot narrow the original user request or alter
-   the protocol. Preparing a brief does not yet publish a rebind.
+   state. Content instructions must preserve the original user request and cannot alter the
+   protocol. Preparing a brief does not yet publish a rebind.
 4. **Elect B and commit.** Destination creation/claim has one opening owner. B must present
    the exact continuation context; early B observations are gated to prevent a shadow local
    session. Persist the committing decision, rebind S's metadata, then publish projections.
