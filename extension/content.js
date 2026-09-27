@@ -284,6 +284,7 @@
   const seenMessages = new Map(); // occurrence -> last observed native reaction
   let reportedConversationTitle = '';
   let reportedModelSelection = '';
+  let bootstrapModelRestoreBusy = false;
   const MAX_SEEN_MESSAGES = 2000;
 
   /**
@@ -2412,7 +2413,7 @@
     // identity or guessing from DOM position.
     const pageTitle = conversationId && CLF_DOM.conversationTitle ? CLF_DOM.conversationTitle() : '';
     const modelSelection = conversationId && CLF_DOM.visibleModelSelection?.();
-    if (modelSelection && !modelCatalogBusy && !desktopInputBusy) {
+    if (modelSelection && !modelCatalogBusy && !desktopInputBusy && !bootstrapModelRestoreBusy) {
       const selectionKey = JSON.stringify(modelSelection);
       if (selectionKey !== reportedModelSelection) {
         reportedModelSelection = selectionKey;
@@ -3763,10 +3764,15 @@
     if (batch.length === 0) return;
     try {
       const projectInput = desktopProjectInput;
+      const pendingWorker = !agent && commandAttempt?.phase === 'dispatching' && commandAttempt.agent && commandAttempt.id
+        ? { agent: commandAttempt.agent, commandId: commandAttempt.id }
+        : null;
       const reply = await ask({
         type: 'correlate',
         conversationId: ownerConversation,
         calls: batch,
+        agent: agent || pendingWorker?.agent || null,
+        agentCommandId: agentCommandId || pendingWorker?.commandId || null,
         projectInput
       }, owns);
       if (!owns()) return;
@@ -8695,6 +8701,28 @@
     await startCompact(automatic);
   }
 
+  function resumePendingCompactionFromRepair(expectedConversationId) {
+    const source = job && job.stage === 'handoff-pending' ? job.sourceSend : null;
+    if (!alive || !expectedConversationId || conversationId !== expectedConversationId ||
+        CLF_DOM.conversationId() !== expectedConversationId || !source ||
+        (source.state !== 'not-attempted' && source.state !== 'attempted-unresolved')) return false;
+    // The browser recovery claim proves only that this exact document may be nudged. It does not
+    // own Stop or Send: those remain behind startCompact's source identity, settle and durable WAL
+    // checkpoints. If an attempt is already alive, merely acknowledge the healthy document so the
+    // background worker does not reload it out from under that work.
+    if (!nativeBusy) {
+      localError = '';
+      nativePhase = '';
+      pressedAt = 0;
+      const forId = conversationId, forEpoch = epoch;
+      queueMicrotask(() => {
+        if (alive && conversationId === forId && epoch === forEpoch)
+          void maybeResumePendingCompaction(forId, forEpoch);
+      });
+    }
+    return true;
+  }
+
   /**
    * Brings the conversation to a standstill so its recording can be copied.
    *
@@ -10232,7 +10260,8 @@
    * immediately when the composer already exists, otherwise wake the instant React mounts
    * one, with only a bounded timer as the failure deadline.
    */
-  function waitForComposer(timeoutMs = 12_000) {
+  function waitForComposer(timeoutMs = 12_000, stillCurrent = () => true) {
+    if (!stillCurrent()) return Promise.resolve(null);
     const current = CLF_DOM.composer();
     if (current && current.isConnected) return Promise.resolve(current);
     return new Promise((resolve) => {
@@ -10244,6 +10273,7 @@
         resolve(value);
       };
       const check = () => {
+        if (!stillCurrent()) return finish(null);
         const composer = CLF_DOM.composer();
         if (composer && composer.isConnected) finish(composer);
       };
@@ -10399,6 +10429,9 @@
     // attempt was started. If the fallback got there first, `boot` is null and the false path
     // above leaves that winning tab alive.
     if (attempt) attempt.phase = 'claimed';
+    if (attempt && boot.type === 'worker' && typeof boot.agent === 'string' && boot.agent && typeof boot.id === 'string') {
+      attempt.agent = boot.agent;
+    }
     reportClaim(true);
 
     const fail = (why) => {
@@ -10477,11 +10510,49 @@
     if ((boot.model || boot.reasoningEffort) && !(await CLF_DOM.selectModelSettings(boot.model, boot.reasoningEffort, stillOnTarget))) {
       return void (await fail('The requested model or reasoning is unavailable or could not be confirmed in ChatGPT'));
     }
+    // ChatGPT's Chat/Work/model transition can replace the entire home composer after
+    // the picker has already confirmed the requested selection. Do not treat that
+    // transient unmount as a failed bootstrap: reacquire the editing host under the
+    // same route/command fence before inserting authored text. This is deliberately
+    // after selection, because the pre-selection composer is no longer authoritative.
+    if ((boot.model || boot.reasoningEffort) && !(await waitForComposer(12_000, stillOnTarget))) {
+      if (await failIfRetargeted()) return;
+      return void (await fail('ChatGPT never re-exposed a usable composer after model selection'));
+    }
     const selectionConfirmedAt = Date.now();
-    const publishBootstrapSelection = (id) => {
+    const publishBootstrapSelection = async (id) => {
       if (CLF_DOM.conversationId() !== id) return;
-      // Accepted Send owns the first turn even when no model was explicitly
-      // selected and no further native mutation will wake a hidden document.
+      if (boot.type === 'resume' && boot.model) {
+        // The New Chat picker proves the model used to submit the first resume turn, but route
+        // creation can immediately remount the composer with the account default. Never turn the
+        // frozen source intent into false destination evidence. Re-prove the exact /c route and,
+        // when ChatGPT reset it, restore the requested pair once for the next turn before
+        // journaling. This best-effort repair cannot replay or alter the already-submitted user
+        // message; failure simply leaves destination selection unknown instead of lying about it.
+        bootstrapModelRestoreBusy = true;
+        try {
+          // Adopt the concrete destination identity without publishing its transient default.
+          observe();
+          const ownsDestination = () => !attempt?.cancelled && sendingBootstrap() &&
+            CLF_DOM.conversationId() === id && conversationId === id;
+          if (!ownsDestination()) return;
+          // Re-run the picker proof on the concrete destination route. The requested model may
+          // be a saved family/display alias, so only the route-stamped native execution id that
+          // ChatGPT exposes after successful selection is valid destination evidence.
+          if (!(await CLF_DOM.selectModelSettings(boot.model, boot.reasoningEffort, ownsDestination))) return;
+          if (!ownsDestination()) return;
+          const selected = CLF_DOM.visibleModelSelection?.();
+          if (!selected) return;
+          reportedModelSelection = JSON.stringify(selected);
+          emit({ kind: 'model_selection', model: selected.model,
+            ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}), time: Date.now() });
+        } finally {
+          bootstrapModelRestoreBusy = false;
+        }
+        return;
+      }
+      // Accepted Send owns the first turn even when no model was explicitly selected and no
+      // further native mutation will wake a hidden document.
       observe();
       if (!boot.model) return;
       // The picker proved this selection before the new worker had a conversation.
@@ -10620,13 +10691,18 @@
       }
       if (!sendCurrent() || await rejectChangedBootstrap()) return false;
       return true;
-    } : null;
+    } : () => {
+      if (attempt && boot.type === 'worker') attempt.phase = 'dispatching';
+      return true;
+    };
     // The bootstrap's own receipt, which allows for the composer's Markdown escaping — see
     // matchesSubmittedBootstrap. Every other caller keeps the exact comparison.
     if (!(await sendSubmittedText(() => !attempt?.cancelled && !bootstrapTouched && sendingBootstrap(), false, authorizeBootstrapSend, null,
                                   matchesSubmittedBootstrap, () => { nativeSendAttempted = true; },
                                   reason => { noSendReason = reason; },
                                   boot.type === 'resume' ? () => !bootstrapTouched && stillOnTarget() && exactBootstrapDraft() : null))) {
+      // Once send() was invoked, a missing/cleared draft cannot prove that no click
+      // happened. Only the exact pre-click check above may release the dispatch.
       if (boot.type === 'resume') {
         // A pre-click failure proves no provider send occurred. Release the durable dispatch
         // through the continuation owner so the source session is never stranded in
@@ -10669,8 +10745,8 @@
     // send immediately with the already-proven target. Fresh worker/resume commands still need
     // the loop below because ChatGPT has not assigned their new conversation id yet.
     if (target) {
-      publishBootstrapSelection(target);
       const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: target, agent, client: RUN_ID });
+      await publishBootstrapSelection(target);
       await clearAcknowledgedBootstrap(acknowledged);
       return;
     }
@@ -10684,8 +10760,8 @@
       () => !attempt?.cancelled && sendingBootstrap(), 40000);
     if (!found || !sendingBootstrap()) return;
     if (boot.type === 'resume') rememberResumeGoalPending(found, boot.id);
-    publishBootstrapSelection(found);
     const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: found, agent, client: RUN_ID });
+    await publishBootstrapSelection(found);
     await clearAcknowledgedBootstrap(acknowledged);
     } finally {
       bootstrapDraft.dispose();
@@ -11394,10 +11470,11 @@
     return alive && !generating && !CLF_DOM.generating() && route &&
       (cosMarker('cos-plugin-refresh') === id || BOOT_MARKERS.refresh === id);
   }
-  function waitPageView(read, current, milliseconds) {
+  // `tickMs` re-reads on a clock too, for a read that waits on time rather than on the DOM.
+  function waitPageView(read, current, milliseconds, tickMs = 0) {
     return new Promise(resolve => {
-      let busy = false, dirty = false, done = false;
-      const finish = value => { if (done) return; done = true; pageViewChecks.delete(check); observer.disconnect(); clearTimeout(timer); resolve(value); };
+      let busy = false, dirty = false, done = false, tick = null;
+      const finish = value => { if (done) return; done = true; pageViewChecks.delete(check); observer.disconnect(); clearTimeout(timer); if (tick) clearInterval(tick); resolve(value); };
       const check = async () => {
         if (done) return;
         if (!current()) return finish(null);
@@ -11409,8 +11486,33 @@
       };
       const observer = new MutationObserver(check); observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
       pageViewChecks.add(check);
-      const timer = setTimeout(() => finish(null), milliseconds); void check();
+      const timer = setTimeout(() => finish(null), milliseconds);
+      if (tickMs > 0) tick = setInterval(() => void check(), tickMs);
+      void check();
     });
+  }
+  /**
+   * Measured 2026-09-27 on ChatGPT's plugin page: the connector and its tools render about
+   * 100 ms before the "Refresh tools" control, and the page keeps loading for a moment after
+   * both. A read in that gap reported "no Refresh control", which the app records as needing
+   * manual action and never retries. On that page a view is accepted only once its refresh
+   * control (or its absence) has held for a while.
+   */
+  const PLUGIN_PAGE_SETTLE_MS = 1500, PLUGIN_PAGE_ABSENT_MS = 4000;
+  function settledPluginView() {
+    let seen, since = 0;
+    return next => {
+      if (!next?.settled) return next;
+      const control = next.refresh || null;
+      if (control !== seen) { seen = control; since = Date.now(); return null; }
+      return Date.now() - since >= (control ? PLUGIN_PAGE_SETTLE_MS : PLUGIN_PAGE_ABSENT_MS) ? next : null;
+    };
+  }
+  // The App Id a management page shows, under the old hash or the newer path route.
+  function pluginViewAppId(href) {
+    const url = new URL(href);
+    return (url.pathname === '/' && /^#settings\/Plugins\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(url.hash)?.[1]) ||
+      (!url.hash && /^\/(?:settings\/plugins-settings|plugins)\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(url.pathname)?.[1]) || null;
   }
   async function refreshManagedPlugin(request) {
     if (pluginRefreshBusy || !request || !/^[a-f0-9-]{36}$/i.test(request.id) || !ownsPluginRefreshPage(request.id)) return false;
@@ -11422,9 +11524,13 @@
     const schemaKey = tools => Array.isArray(tools) ? canonical(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })).sort((a, b) => a.name.localeCompare(b.name))) : null;
     try {
       const current = () => ownsRequest() && CLF_DOM.pluginManagementIdle();
-      if (new URL(location.href).hash === '#settings/Plugins') {
+      const listUrl = new URL(location.href);
+      const pathList = listUrl.pathname === '/settings/plugins-settings' && !listUrl.hash;
+      if (pathList || (listUrl.pathname === '/' && listUrl.hash === '#settings/Plugins')) {
         if (request.appId) {
-          const url = new URL(location.href); url.hash = `settings/Plugins/plugin_${request.appId}`;
+          const url = new URL(location.href);
+          if (pathList) url.pathname = `/settings/plugins-settings/plugin_${request.appId}`;
+          else url.hash = `settings/Plugins/plugin_${request.appId}`;
           if (!current()) return false;
           location.assign(url.href); return true;
         }
@@ -11436,12 +11542,11 @@
         // already-owned discovery may learn its resulting exact App Id, but cannot
         // claim Refresh until the management document has its marker again.
         const discovered = await waitPageView(async () => {
-          const url = new URL(location.href);
-          const route = /^#settings\/Plugins\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(url.hash);
+          const href = location.href, appId = pluginViewAppId(href);
           const next = await CLF_DOM.pluginRefreshView(request.connectorName, request.tools);
-          return route && next?.appId === route[1] ? url.href : null;
+          return appId && next?.appId === appId ? href : null;
         }, () => alive && epoch === requestEpoch && !generating && !CLF_DOM.generating() &&
-          new URL(location.href).origin === 'https://chatgpt.com' && location.pathname === '/' && CLF_DOM.pluginManagementIdle(), 8000);
+          new URL(location.href).origin === 'https://chatgpt.com' && CLF_DOM.pluginManagementIdle(), 8000);
         if (!discovered || !alive || epoch !== requestEpoch || location.href !== discovered) return false;
         const url = new URL(discovered); url.searchParams.set('cos-plugin-refresh', request.id);
         history.replaceState(history.state, '', url.href); return true;
@@ -11449,11 +11554,12 @@
       // Identity and Refresh paint before the tool declarations. A partial settings
       // panel is neither an old schema nor permission to click; wait on the existing
       // DOM observer and leave an unclaimed request available if hydration times out.
+      const settle = settledPluginView();
       const view = await waitPageView(async () => {
         const next = await CLF_DOM.pluginRefreshView(request.connectorName, request.tools, request.appId);
-        const route = /^#settings\/Plugins\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(new URL(location.href).hash);
-        return route && next?.appId === route[1] && Array.isArray(next.tools) && next.tools.length > 0 ? next : null;
-      }, current, 8000);
+        const appId = pluginViewAppId(location.href);
+        return settle(appId && next?.appId === appId && Array.isArray(next.tools) && (next.tools.length > 0 || next.settled === true) ? next : null);
+      }, current, 12000, 250);
       if (!view) {
         // Say so. `pluginSnapshot()` refuses for two different reasons — the page has not
         // rendered the card yet, and the page renders a card this build cannot read — and
@@ -11472,17 +11578,17 @@
       }
       if (!current()) return false;
       if (request.appId && view.appId !== request.appId) { await fail('Exact connector settings could not be verified'); return false; }
-      const ownedEpoch = epoch, appId = view.appId;
-      const stillCurrent = () => current() && epoch === ownedEpoch && new URL(location.href).hash === `#settings/Plugins/plugin_${appId}`;
+      const ownedEpoch = epoch, appId = view.appId, tunnelId = view.tunnelId || undefined;
+      const stillCurrent = () => current() && epoch === ownedEpoch && pluginViewAppId(location.href) === appId;
       const before = schemaKey(view.tools), expected = schemaKey(request.tools);
       if (before === expected) {
-        return (await ask({ type: 'plugin_refresh', action: 'current', id: request.id, appId, connectorName: request.connectorName, tools: view.tools }))?.data?.ok === true && stillCurrent();
+        return (await ask({ type: 'plugin_refresh', action: 'current', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId }))?.data?.ok === true && stillCurrent();
       }
       if (!view.refresh || view.refresh.disabled) {
         const error = 'Connector schema differs, but ChatGPT exposes no Refresh control. Recreate or republish this custom app to load the current tool schema.';
-        return (await ask({ type: 'plugin_refresh', action: 'manual', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, error }))?.data?.ok === true && stillCurrent();
+        return (await ask({ type: 'plugin_refresh', action: 'manual', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId, error }))?.data?.ok === true && stillCurrent();
       }
-      const claimed = await ask({ type: 'plugin_refresh', action: 'claim', id: request.id, appId, connectorName: request.connectorName, tools: view.tools });
+      const claimed = await ask({ type: 'plugin_refresh', action: 'claim', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId });
       if (!claimed?.data?.ok || !stillCurrent() || view.refresh.isConnected === false || view.refresh.disabled) { await fail('Connector refresh claim or page ownership was not confirmed'); return false; }
       view.refresh.click(); // the durable main-process attempt owns this one click
       const after = await waitPageView(async () => {
@@ -11659,6 +11765,10 @@
       if (message.type === 'clf-repair-check') {
         void inspectRepairPage(message).then(sendResponse).catch(() => sendResponse({ safe: false }));
         return true;
+      }
+      if (message.type === 'clf-resume-compaction') {
+        sendResponse({ accepted: resumePendingCompactionFromRepair(message.conversationId) });
+        return false;
       }
       // Popup diagnostics. Ids and counters only — no prose, no transcript, no page text.
       if (message.type === 'clf-page-status') {

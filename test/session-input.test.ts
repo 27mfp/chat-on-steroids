@@ -17,7 +17,10 @@ import { listUsageSessions, turnHasMcpCall } from '../src/main/session/store.js'
 import { trackInFlight, emptyEvidence, type CallContext } from '../src/main/mcp/call-context.js';
 // Ownership tests inspect messages; batch-specific assertions use the complete delivery below.
 const offerToolInput = async (...args: Parameters<typeof offerToolInputBatch>) => (await offerToolInputBatch(...args)).messages;
-vi.mock('../src/main/session/recorder.js', () => ({ noteChatOrigin: vi.fn(async () => undefined) }));
+vi.mock('../src/main/session/recorder.js', () => ({
+  noteChatOrigin: vi.fn(async () => undefined),
+  evidenceWindow: (milliseconds: number) => milliseconds
+}));
 
 const openings = vi.hoisted(() => new Map<string, { id: string; conversationId: string | null; origin: { kind: string } }>());
 const binding = vi.hoisted(() => ({ origin: 'desktop', conversationId: 'conversation-a', blocked: false, recorded: true, activeTurnId: null as string | null, lastToolCallAt: null as number | null, finishEnabled: true, goalEnabled: false, finishReleased: false, model: 'gpt-6-astra', leadMinutes: 5, impulseMinutes: 0, end: null as null | { kind: string; outcome: string; reason?: string; turnId: string; time: number; seq?: number } }));

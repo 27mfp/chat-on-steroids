@@ -3904,3 +3904,13 @@ describe('activity windows', () => {
     expect(CHAT_ACTIVE_MS - CHAT_SILENCE_MS).toBeGreaterThanOrEqual(60_000);
   });
 });
+
+it('ships the long-standing handoff brief rules as the editable default, unchanged', () => {
+  // Making the prompt editable must not quietly change Compact & Resume for everyone who never
+  // opens the editor: the default is the brief the app has always asked for.
+  expect(DEFAULT_HANDOFF_PROMPT).toContain('target roughly 10,000–30,000 tokens');
+  for (const heading of ['TASK —', 'USER SPECIFICATION —', 'CURRENT STATE —', 'DONE —', 'IN PROGRESS —', 'PLANNED / DECIDED —',
+    'FAILED / UNRESOLVED —', 'FILES —', 'VERIFICATION —', 'ENVIRONMENT —', 'NEXT —', 'DO NOT —']) {
+    expect(DEFAULT_HANDOFF_PROMPT, heading).toContain(heading);
+  }
+});

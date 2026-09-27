@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-26**, including upstream 2.1.15 and selected fork integrations. App/extension **2.1.15**,
+Source alignment: **2026-09-27**, including upstream 2.1.16 and selected fork integrations. App/extension **2.1.16**,
 bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
 
@@ -3324,10 +3324,10 @@ shared-tree change may already have addressed them.
   and phase rather than ordinary-turn idleness. Suspended-tab repair retains its separate
   existing action checks.
   Keep their operation-specific authority current through the browser action boundary.
-- **Goal publication:** explicit switch writes serialize, but mutate shared memory before
-  the awaited durable write; synchronous clear/move paths and objective/reply mutations do not
-  all share the same semantic transaction. Intent is durable commit before visible state, with
-  rollback unable to overwrite a newer accepted change.
+- **Goal publication:** explicit switch and objective writes now stage changes until the
+  durable write completes, and reject or retarget stale saves. Synchronous clear/move paths
+  and reply mutations still do not all share that semantic transaction. Intent is durable
+  commit before visible state, with an older save unable to overwrite a newer accepted change.
 - **Goal cross-ledger controls:** master/config/secret changes still cross separate ledgers.
   Recording Off lacks a uniform runtime gate for retained per-chat overrides. Attempt
   invalidation now preserves debt, but these remaining controls still need one durable

@@ -56,6 +56,7 @@ import { BROWSER_BRIDGE_PORTS } from '../shared/browser-bridge.js';
 import { bridgePortSelection } from './bridge-ports.js';
 import { bridgeAppId } from './fork-instance.js';
 import type { Config } from '../shared/types.js';
+import type { PluginSurface } from '../shared/plugin-refresh.js';
 import { getSecret, secureStorageStatus, setSecret } from './secrets.js';
 import {
   acceptGoalReplyNow,
@@ -519,6 +520,28 @@ let lastSeenAt: number | null = null;
 let browserPresenceTimer: NodeJS.Timeout | null = null;
 let commands: Command[] = [];
 let commandReceipts: CommandReceipt[] = [];
+
+/**
+ * Binds the exact fresh worker page that redeemed one still-live bootstrap command.
+ *
+ * The friendly worker id is deliberately insufficient because every later run reuses it.
+ * The random command id is the browser-held authority that proves which invited slot opened
+ * this document. Both `/events` lost-ACK recovery and the earlier `/correlations` handshake
+ * use this same boundary so a worker cannot begin MCP work in a gap where attribution already
+ * knows its conversation but the agent dispatcher still sees a stranger.
+ */
+function bindLeasedWorkerCommand(agent: string | null, commandId: string | null, conversation: string): boolean {
+  if (!agent || !commandId) return false;
+  const pending = commands.find(
+    (command) =>
+      command.id === commandId &&
+      command.spec.type === 'worker' &&
+      command.spec.agent === agent &&
+      swarmRunning(command.spec.runId) &&
+      command.claimedAt !== null
+  );
+  return pending?.spec.type === 'worker' ? bindConversation(agent, conversation, pending.spec.runId) : false;
+}
 /**
  * Worker/revival transports already removed from live delivery but still kept in durable
  * snapshots until the broker-side failed/sleeping transition has crossed its own fsync.
@@ -1051,8 +1074,10 @@ function parseCallEvidence(input: unknown, untooled = false): PageCallEvidence[]
     if (!raw || typeof raw !== 'object') continue;
     const item = raw as Record<string, unknown>;
     const tool = typeof item['tool'] === 'string' && TOOL_NAME.test(item['tool']) ? item['tool'] : '';
-    const messageId = typeof item['messageId'] === 'string' ? item['messageId'].slice(0, 120) : '';
-    const bare = untooled && typeof item['requestId'] === 'string';
+    const requestId =
+      typeof item['requestId'] === 'string' && /^[a-z0-9_-]{1,100}$/i.test(item['requestId']) ? item['requestId'] : null;
+    const pageMessageId = typeof item['messageId'] === 'string' ? item['messageId'].slice(0, 120) : '';
+    const bare = untooled && requestId !== null;
     if (!tool && !bare) continue;
     // A stream origin has no message to name. It is read off the `/f/conversation` SSE body
     // before ChatGPT has mounted anything, so `messageId` is null by construction — and the one
@@ -1062,14 +1087,20 @@ function parseCallEvidence(input: unknown, untooled = false): PageCallEvidence[]
     // answered `bad_request_evidence` without a log line, and the call still waited out the full
     // twenty-second identity window and was filed under Unattributed activity. Reported with
     // before/after measurements on the live page in #393: `identity_ms` 15001 -> 2, and no
-    // attribution repair reload afterwards. Bare rows are deduplicated by the id they do carry.
-    const key = messageId || `request:${item['requestId'] as string}`;
-    if (!messageId && !bare) continue;
-    if (seen.has(key)) {
-      duplicated.add(key);
+    // attribution repair reload afterwards. The durable correlation registry also requires a
+    // nonempty message key when restoring after restart, so a pre-DOM stream sighting gets one
+    // deterministic, explicitly non-provider identity. It is never used for transcript joins;
+    // requestId remains the only ownership key.
+    const stream = bare && !pageMessageId;
+    const messageId = stream ? `stream:${requestId}` : pageMessageId;
+    if (!messageId) continue;
+    if (seen.has(messageId)) {
+      // Re-observing the same exact stream request is one fact. A reused provider message id is
+      // ambiguous and still drops both sides as before.
+      if (!stream) duplicated.add(messageId);
       continue;
     }
-    seen.add(key);
+    seen.add(messageId);
     out.push({
       messageId,
       tool,
@@ -1079,15 +1110,12 @@ function parseCallEvidence(input: unknown, untooled = false): PageCallEvidence[]
       answered: item['answered'] === true,
       // Rebuilt like everything else here — an opaque id checked for shape, and a finite
       // number — so the page cannot smuggle anything through them.
-      requestId:
-        typeof item['requestId'] === 'string' && /^[a-z0-9_-]{1,100}$/i.test(item['requestId'])
-          ? item['requestId']
-          : null,
+      requestId,
       createTime:
         typeof item['createTime'] === 'number' && Number.isFinite(item['createTime']) ? item['createTime'] : null
     });
   }
-  return out.filter((call) => !duplicated.has(call.messageId || `request:${call.requestId}`));
+  return out.filter((call) => !duplicated.has(call.messageId));
 }
 
 /**
@@ -1967,10 +1995,15 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (body.action === 'claim' && getConfig().ui.autoRefreshPlugins !== true) return json(res, 409, { ok: false, error: 'automatic_refresh_disabled' }, origin);
     if (typeof body.id !== 'string' || !/^[a-f0-9-]{36}$/i.test(body.id)) return json(res, 400, { error: 'invalid_request' }, origin);
     let ok = false;
+    const tunnelId = typeof body.tunnelId === 'string' && /^tunnel_[a-zA-Z0-9]{8,80}$/.test(body.tunnelId) ? body.tunnelId : undefined;
+    const ownsTunnel = (surface: PluginSurface, id: string) => {
+      const tunnel = getConfig().tunnel;
+      return (surface === 'core' ? tunnel.tunnelId : surface === 'desktop' ? tunnel.desktopTunnelId : tunnel.pluginsTunnelId) === id;
+    };
     if (body.action === 'fail' && typeof body.error === 'string') ok = await failPluginRefresh({ id: body.id, error: body.error.slice(0, 200) });
     else if (typeof body.appId === 'string' && /^asdk_app_[a-zA-Z0-9_-]{1,160}$/.test(body.appId)) {
-      if ((body.action === 'claim' || body.action === 'current') && typeof body.connectorName === 'string') ok = await claimPluginRefresh({ id: body.id, appId: body.appId, connectorName: body.connectorName, tools: body.tools, alreadyCurrent: body.action === 'current' });
-      if (body.action === 'manual' && typeof body.connectorName === 'string' && typeof body.error === 'string') ok = await requireManualPluginRefresh({ id: body.id, appId: body.appId, connectorName: body.connectorName, tools: body.tools, error: body.error.slice(0, 200) });
+      if ((body.action === 'claim' || body.action === 'current') && typeof body.connectorName === 'string') ok = await claimPluginRefresh({ id: body.id, appId: body.appId, connectorName: body.connectorName, tools: body.tools, tunnelId, ownsTunnel, alreadyCurrent: body.action === 'current' });
+      if (body.action === 'manual' && typeof body.connectorName === 'string' && typeof body.error === 'string') ok = await requireManualPluginRefresh({ id: body.id, appId: body.appId, connectorName: body.connectorName, tools: body.tools, tunnelId, ownsTunnel, error: body.error.slice(0, 200) });
       if (body.action === 'complete') ok = await completePluginRefresh({ id: body.id, appId: body.appId, tools: body.tools, versionId: typeof body.versionId === 'string' ? body.versionId.slice(0, 200) : undefined });
     }
     if (ok) changed();
@@ -2019,7 +2052,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const repaired = url.searchParams.get('repaired');
     const repairFailed = url.searchParams.get('repairFailed');
     const repairAction = url.searchParams.get('repairAction');
-    const action = repairAction === 'reloaded' || repairAction === 'reopened' ? repairAction : null;
+    const action = repairAction === 'reloaded' || repairAction === 'reopened' || repairAction === 'resumed' ? repairAction : null;
     if (repaired) {
       await confirmRepair(repaired.slice(0, 64), action);
     } else if (repairFailed) {
@@ -2182,6 +2215,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
     const calls = parseCallEvidence(body['calls'], true).filter((call) => call.requestId !== null);
     if (calls.length === 0) return json(res, 400, { error: 'bad_request_evidence' }, origin);
+    const reportedAgent = typeof body['agent'] === 'string' && /^[a-z0-9-]{1,40}$/i.test(body['agent'])
+      ? body['agent']
+      : null;
+    const reportedCommandId = typeof body['agentCommandId'] === 'string' ? body['agentCommandId'] : null;
+    bindLeasedWorkerCommand(reportedAgent, reportedCommandId, id);
 
     // This is the live-turn ownership handshake, deliberately separate from transcript
     // delivery. A fresh ChatGPT conversation can expose metadata.request_id before its
@@ -2246,17 +2284,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       ? body['agent']
       : null;
     const reportedCommandId = typeof body['agentCommandId'] === 'string' ? body['agentCommandId'] : null;
-    if (reportedAgent && reportedCommandId) {
-      const pending = commands.find(
-        (command) =>
-          command.id === reportedCommandId &&
-          command.spec.type === 'worker' &&
-          command.spec.agent === reportedAgent &&
-          swarmRunning(command.spec.runId) &&
-          command.claimedAt !== null
-      );
-      if (pending?.spec.type === 'worker') bindConversation(reportedAgent, id, pending.spec.runId);
-    }
+    bindLeasedWorkerCommand(reportedAgent, reportedCommandId, id);
     // This reports attachment only. The recorder below owns actual work and replay deduplication.
     const revived = noteAgentAlive(id, 'page');
     if (revived?.report) await recordAgentMessage(revived.report, 'sent', id);
@@ -7519,13 +7547,13 @@ const PICKUP_WATCH_LIFETIME_MS = 12 * 60 * 60_000;
  * compaction going, and each pickup raises the tab first (a background tab is a throttled one;
  * that is how the 2026-09-03 source page froze solid while its brief was being written).
  *
- * `asking` — the brief has not been asked for yet. Nothing has reached ChatGPT, so the reload
- * is free and the wait is short: every two minutes for ten minutes, the tab raised each time, and
- * the fresh page resumes the ticket the instant it reads it back. Five pickups with no send is a
- * chat that will not take the prompt — a tab that never comes back, a composer that will not
- * accept it — and the ticket is abandoned rather than left to nag: the next working turn opens
- * a fresh one. Which is also what keeps an old chat quiet: a ticket only ever opens on a working
- * chat, and one that could not be sent expires with its ten minutes.
+ * `asking` — the brief has not been asked for yet. Nothing has reached ChatGPT, so recovery starts
+ * quickly: every two minutes for an initial five pickups. A manual request may be abandoned after
+ * that burst because no Send is uncertain. A threshold-created automatic ticket is different:
+ * the source may spend the whole interval draining native/local work, so exhaustion only slows
+ * the next retry instead of silently cancelling compaction while the chat keeps growing. A
+ * responsive exact source is nudged to retry its durable ticket rather than reloaded out from
+ * under its settle/Stop attempt.
  *
  * `writing` — the marked prompt is with ChatGPT and the brief is being generated. A reload here
  * loses nothing (the stable marker recovers a brief already generated or still generating) but
@@ -7535,8 +7563,8 @@ const PICKUP_WATCH_LIFETIME_MS = 12 * 60 * 60_000;
  * `opening` — the brief landed and the replacement chat is owed. The resume command is leased
  * for a quarter of an hour, so that is the cadence, three times.
  *
- * Page activity never pushes any of these; `since` is when the phase began (the ticket's
- * opening, the prompt's durable dispatch) or when it was last picked up. A phase change resets
+ * Page activity never pushes any of these; `nextAt` is derived from when the phase began (the
+ * ticket's opening, the prompt's durable dispatch) or from the last pickup. A phase change resets
  * the count — the writing phase's three do not include the two the asking phase spent.
  */
 type CompactionPhase = 'asking' | 'writing' | 'opening';
@@ -7545,7 +7573,16 @@ const COMPACTION_PICKUPS: Record<CompactionPhase, { every: number; attempts: num
   writing: { every: 5 * 60_000, attempts: 3 },
   opening: { every: 15 * 60_000, attempts: 3 }
 };
-const compactionWatch = new Map<string, { token: string; phase: CompactionPhase; since: number; attempts: number }>();
+const compactionWatch = new Map<string, { token: string; phase: CompactionPhase; nextAt: number; attempts: number; backoffs?: number }>();
+const AUTOMATIC_ASKING_RETRY_PAUSE_MS = 10 * 60_000;
+/**
+ * How many slowed extra bursts an automatic pre-Send ticket gets before it is abandoned like a
+ * manual one. Each pickup reloads the source page, so an unbounded retry turns a chat that can
+ * never reach Send — #419: a turn that died mid-tool-call leaves results the page will never
+ * acknowledge — into a reload every two minutes for as long as the chat exists. After this the
+ * next working turn opens a fresh ticket, as before.
+ */
+const AUTOMATIC_ASKING_RETRY_BURSTS = 2;
 
 function compactionPhaseOf(entry: ContinuationView): CompactionPhase {
   if (entry.state !== 'awaiting-summary') return 'opening';
@@ -7566,10 +7603,10 @@ function expediteCompactionPickup(conversationId: string): boolean {
   const watch = compactionWatch.get(conversationId);
   if (watch && watch.token === entry.token && watch.phase === phase) {
     if (watch.attempts >= COMPACTION_PICKUPS[phase].attempts) return false;
-    watch.since = 0;
+    watch.nextAt = 0;
     return true;
   }
-  compactionWatch.set(conversationId, { token: entry.token, phase, attempts: 0, since: 0 });
+  compactionWatch.set(conversationId, { token: entry.token, phase, attempts: 0, nextAt: 0 });
   return true;
 }
 
@@ -7699,9 +7736,10 @@ async function inspectOwedPickups(now: number): Promise<boolean> {
 /**
  * Gives durable compaction tickets their bounded browser pickups — see COMPACTION_PICKUPS.
  *
- * Only the asking phase has a failure verdict: a prompt that could not be sent in ten minutes
- * is abandoned. Past the send the ticket has no clock here; it remains collectable by any later
- * page until explicit cancel or the marked bootstrap's durable commit in chat B.
+ * Only a manual asking phase has a time-budget failure verdict. Automatic tickets retain the
+ * exact token after an exhausted pickup burst and retry on a slower cadence. Past source Send,
+ * every ticket has no abandonment clock here; it remains collectable until explicit cancel or
+ * the marked bootstrap's durable commit in chat B.
  * Auto Off additionally cancels threshold-created tickets, never manual requests.
  */
 async function inspectOwedCompactions(now: number): Promise<boolean> {
@@ -7728,13 +7766,27 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
       // for asking, the durable dispatch stamp for writing. The brief's landing has no stamp
       // of its own, and at a quarter-hour cadence the sweep's half-minute lag does not matter.
       const since = Math.max(compactionWatchFloor, phase === 'asking' ? entry.openedAt : phase === 'writing' ? (entry.askedAt ?? now) : now);
-      watch = { token: entry.token, phase, attempts: 0, since };
+      watch = { token: entry.token, phase, attempts: 0, nextAt: since + COMPACTION_PICKUPS[phase].every };
       compactionWatch.set(entry.from, watch);
     }
     const schedule = COMPACTION_PICKUPS[phase];
-    if (now < watch.since + schedule.every) continue;
+    if (now < watch.nextAt) continue;
     if (watch.attempts >= schedule.attempts) {
       if (phase !== 'asking') continue;
+      if (entry.automatic && (watch.backoffs ?? 0) < AUTOMATIC_ASKING_RETRY_BURSTS) {
+        // A threshold-created ticket is durable work, not a ten-minute liveness verdict. The
+        // source can spend this whole first budget draining native/local work without ever
+        // reaching Send. Keep the exact pre-Send token and slow the recovery cadence instead of
+        // silently dropping auto-compaction while the chat keeps growing. Auto Off, explicit
+        // Cancel, or a page-proven pre-Send refusal remain the terminal owners.
+        watch.attempts = 0;
+        watch.backoffs = (watch.backoffs ?? 0) + 1;
+        watch.nextAt = now + AUTOMATIC_ASKING_RETRY_PAUSE_MS;
+        logInfo(
+          `bridge: compaction ticket ${entry.token.slice(0, 8)} still has no source Send after ${schedule.attempts} pickups — retaining automatic ticket and backing off`
+        );
+        continue;
+      }
       // Ten minutes and five raised reloads without the prompt ever reaching ChatGPT. The
       // chat's tools were never fenced (that starts at the send), so nothing is stranded by
       // letting go; what would be stranded is the chat under a ticket it can never discharge.
@@ -7778,7 +7830,7 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
     if (!acted) continue;
 
     watch.attempts += 1;
-    watch.since = now;
+    watch.nextAt = now + schedule.every;
     queued = true;
     logInfo(
       `bridge: compaction ticket ${entry.token.slice(0, 8)} ${phase} pickup ${watch.attempts} of ${schedule.attempts}`
@@ -8345,7 +8397,7 @@ function attributionRepairCurrent(repair: Repair, session: SessionSummary | null
  * this app is no longer waiting on - an older turn's, or one already re-queued - matches
  * nothing and closes nothing, which is the only safe reading of it.
  */
-async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | null): Promise<void> {
+async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | 'resumed' | null): Promise<void> {
   for (const [conversationId, repair] of repairsInFlight) {
     if (repair.state === 'handed' && repair.token === token) {
       if (!compactionRepairCurrent(conversationId, repair)) { repairsInFlight.delete(conversationId); return; }
@@ -8383,7 +8435,7 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
       await updateRepairProgress(
         conversationId,
         repair,
-        `${action === 'reopened' ? 'Reopened' : 'Reloaded'} chat to recover ${repairReason(repair)}.`
+        `${action === 'reopened' ? 'Reopened' : action === 'resumed' ? 'Resumed' : 'Reloaded'} chat to recover ${repairReason(repair)}.`
       );
       return;
     }
@@ -8391,14 +8443,14 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
 }
 
 /** An exact browser action failed; keep the episode queued and replace its one debug row. */
-async function failRepairAttempt(token: string, action: 'reloaded' | 'reopened' | null): Promise<void> {
+async function failRepairAttempt(token: string, action: 'reloaded' | 'reopened' | 'resumed' | null): Promise<void> {
   for (const [conversationId, repair] of repairsInFlight) {
     if (repair.state !== 'handed' || repair.token !== token) continue;
     logWarn(`bridge: the browser reported failed ${repair.reason} recovery for ${conversationId} (${action ?? 'action unspecified'})`);
     await updateRepairProgress(
       conversationId,
       repair,
-      `${action === 'reopened' ? 'Reopen' : 'Reload'} failed while recovering ${repairReason(repair)}${repair.attribution ? '.' : '; will retry.'}`
+      `${action === 'reopened' ? 'Reopen' : action === 'resumed' ? 'Resume' : 'Reload'} failed while recovering ${repairReason(repair)}${repair.attribution ? '.' : '; will retry.'}`
     );
     if (repairsInFlight.get(conversationId) !== repair) return;
     if (repair.reason === 'assistant-error' && turnRepairSpent.get(conversationId)?.token === token)

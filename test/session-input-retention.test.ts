@@ -9,7 +9,10 @@ import { configureInputDelivery, listInputs, resetInputForTests, type InputEntry
 import { recordDeliveredInput } from '../src/main/session/input-history.js';
 import { noteChatOrigin } from '../src/main/session/recorder.js';
 
-vi.mock('../src/main/session/recorder.js', () => ({ noteChatOrigin: vi.fn(async () => undefined) }));
+vi.mock('../src/main/session/recorder.js', () => ({
+  noteChatOrigin: vi.fn(async () => undefined),
+  evidenceWindow: (milliseconds: number) => milliseconds
+}));
 let directory: string;
 const record = vi.fn(recordDeliveredInput);
 beforeEach(async () => {

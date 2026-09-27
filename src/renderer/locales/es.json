@@ -780,7 +780,7 @@
   "Disconnecting": "Desconectando",
   "Closing connection…": "Cerrando la conexión…",
   "Published": "Publicado",
-  "Please remember to refresh the plugins in ChatGPT.": "Recuerda actualizar los complementos en ChatGPT.",
+  "Chat On Steroids connector tools changed. Refresh the affected connector in ChatGPT; this is separate from the browser extension.": "Han cambiado las herramientas de un conector de Chat On Steroids. Actualiza el conector afectado en ChatGPT; esto es independiente de la extensión del navegador.",
   "Dismiss reminder": "Descartar recordatorio",
   "Files, patches and the terminal. Required — this is the coding connector.": "Archivos, parches y terminal. Obligatorio: es el conector de programación.",
   "Screenshots, windows, mouse/keyboard control and the clipboard. Optional — connect it only if you want desktop automation.": "Capturas de pantalla, ventanas, control del mouse y del teclado, y portapapeles. Opcional: conéctalo para automatizar el escritorio.",
@@ -1554,5 +1554,9 @@
   "{0} · {1} · {2} ago": "{0} · {1} · hace {2}",
   "{0} — found {1} · app receipt {2} · owner {3} · tool activity {4}": "{0} — encontrados {1} · recibo de la aplicación {2} · propietario {3} · actividad de herramientas {4}",
   "{0}: drag, click, or open the context menu": "{0}: arrastra, haz clic o abre el menú contextual",
-  "… still writing. The full answer appears when it finishes.": "… todavía escribiendo. La respuesta completa aparecerá cuando termine."
+  "… still writing. The full answer appears when it finishes.": "… todavía escribiendo. La respuesta completa aparecerá cuando termine.",
+  "ChatGPT’s current model": "Modelo actual de ChatGPT",
+  "Sent without choosing a model": "Se envía sin elegir un modelo",
+  "Use ChatGPT’s current model": "Usar el modelo actual de ChatGPT",
+  "Your ChatGPT plan shows no model picker. Send with the model ChatGPT already uses.": "Tu plan de ChatGPT no muestra selector de modelos. Envía con el modelo que ChatGPT ya usa."
 }

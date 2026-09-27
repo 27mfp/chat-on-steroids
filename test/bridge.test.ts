@@ -105,6 +105,7 @@ const { completeProcessCall, createSession, deleteSession, findSessionByConversa
 );
 const sessionStoreModule = await import('../src/main/session/store.js');
 const { closeConversation, liveConversations, noteChatOrigin, recordChatObservations, recordProgress, recordToolCall, REQUEST_ID_GRACE_MS, resetRecorderForTests } = await import('../src/main/session/recorder.js');
+const { requestCorrelation, resetCorrelationRegistryForTests, restoreRequestCorrelations } = await import('../src/main/session/correlation.js');
 const { resetBlockedChatsForTests, setChatBlocked } = await import('../src/main/session/blocked-chats.js');
 const {
   CONTINUATIONS_STATE,
@@ -1294,6 +1295,27 @@ describe('activity feed', () => {
     });
     expect(mapped.status, 'the stream origin was refused').toBe(200);
     expect(mapped.body).toMatchObject({ ok: true, conversationId, confirmed: [requestId], complete: true });
+  });
+
+  it('restores a stream origin with no native message id after an app restart', async () => {
+    await pair();
+    const conversationId = '19191919-4141-6363-8585-979797979797';
+    const requestId = '41111111-2222-4333-8444-555555555555';
+    const mapped = await request('POST', '/correlations', {
+      body: { conversationId, calls: [{ messageId: null, requestId, createTime: Date.now() / 1000 }] }
+    });
+    expect(mapped.status).toBe(200);
+    expect(mapped.body.confirmed).toContain(requestId);
+    await flushDurable();
+
+    resetCorrelationRegistryForTests();
+    expect(requestCorrelation(requestId)).toBeNull();
+    await restoreRequestCorrelations();
+
+    expect(requestCorrelation(requestId)).toMatchObject({
+      conversationId,
+      messageId: `stream:${requestId}`
+    });
   });
 
   /**
@@ -2642,11 +2664,12 @@ describe('automatic compaction', () => {
   });
 
   /**
-   * Before the prompt has reached ChatGPT the pickup is a two-minute clock with five raised
-   * reloads, and a ticket that still has not been sent after them is abandoned: nothing was
-   * fenced, and the next working turn opens a fresh one. Every pickup asks for the tab in front.
+   * Before the prompt has reached ChatGPT the pickup starts on a two-minute clock. Exhausting
+   * that first browser-recovery budget is not terminal authority for an automatic ticket: a
+   * responsive source may have spent the whole interval draining local/native work. The exact
+   * token survives and retries on a slower cadence until explicit policy/user/page evidence ends it.
    */
-  it.each([false, true])('reloads an unsent automatic ticket every 2 minutes with bounded attempts (restored: %s)', async restored => {
+  it.each([false, true])('retains an unsent automatic ticket after its first pickup budget and retries after backoff (restored: %s)', async restored => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -2688,8 +2711,57 @@ describe('automatic compaction', () => {
 
       await vi.advanceTimersByTimeAsync(2 * 60_000);
       expect(await takeRepair()).toBeNull();
-      expect(continuationByToken(token)).toMatchObject({ state: 'aborted', error: 'handoff_never_sent' });
-      expect(continuationForSession(filed.body.sessionId as string)).toBeNull();
+      expect(continuationByToken(token)).toMatchObject({ automatic: true, state: 'awaiting-summary' });
+      expect(continuationForSession(filed.body.sessionId as string)?.token).toBe(token);
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+      expect(await takeRepair()).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await takeRepair()).toMatchObject({ conversationId, reason: 'compaction', focus: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The retry is bounded. Each pickup reloads the source page, and a chat that can never reach Send
+   * (#419: a turn that died mid-tool-call leaves results the page never acknowledges) would
+   * otherwise be reloaded every two minutes for as long as it exists. After the first burst and two
+   * slowed bursts the ticket is abandoned as a manual one is, and the next working turn opens anew.
+   */
+  it('abandons an automatic ticket that never reaches Send after its bounded retry bursts', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac07';
+      await request('POST', '/events', {
+        body: { conversationId, events: [{ kind: 'user_message', time: Date.now(), text: 'a chat that cannot send', messageId: 'm-auto-bound' }] }
+      });
+      const filed = await request('POST', '/compact', { body: { conversationId, ticket: true, automatic: true } });
+      const token = filed.body.token as string;
+      const takeRepair = async (): Promise<{ token: string; reason: string } | null> => {
+        await sweepStaleSwarm(Date.now());
+        return (await request('GET', '/status')).body.repairs?.[0] ?? null;
+      };
+      let reloads = 0;
+      // Three bursts of five pickups; the pause between bursts is ten minutes.
+      for (let burst = 0; burst < 3; burst += 1) {
+        await vi.advanceTimersByTimeAsync(burst === 0 ? 2 * 60_000 : 10 * 60_000);
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          if (attempt > 0) await vi.advanceTimersByTimeAsync(2 * 60_000);
+          const handout = await takeRepair();
+          expect(handout, `burst ${burst} attempt ${attempt}`).toMatchObject({ reason: 'compaction' });
+          await request('GET', `/status?repaired=${handout!.token}&repairAction=reloaded`);
+          reloads += 1;
+        }
+        await vi.advanceTimersByTimeAsync(2 * 60_000);
+        expect(await takeRepair()).toBeNull();
+      }
+      expect(reloads).toBe(15);
+      expect(continuationForSession(filed.body.sessionId as string)?.token, 'abandoned, not retained').not.toBe(token);
+      // No further reloads, however long the chat stays open.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(await takeRepair()).toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -3462,6 +3534,105 @@ describe('delivering a bootstrap', () => {
     expect(worker.conversationId).toBe(conversationId);
     expect(pendingCommands()).toEqual([]);
     expect(pendingWorkerSpawns()).toEqual([]);
+  });
+
+  it('binds a fresh worker from exact early request correlation before its delayed command acknowledgement', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'report through agents as soon as the first tool call begins' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem(undefined, 'early-correlation-worker-page');
+    const conversationId = 'acacacac-3456-7890-abcd-ef1234567890';
+    const correlate = (agentCommandId: string, requestId: string) => request('POST', '/correlations', {
+      body: {
+        conversationId,
+        agent: 'worker-1',
+        agentCommandId,
+        calls: [{ requestId, messageId: null, tool: 'exec_command', order: 0, answered: false }]
+      }
+    });
+
+    const stale = await correlate('not-the-leased-command', 'f0f00001-1111-4111-8111-111111111111');
+    expect(stale.status).toBe(200);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'invited',
+      conversationId: null
+    });
+
+    const exact = await correlate(command.id, 'f0f00002-1111-4111-8111-111111111111');
+    expect(exact.status).toBe(200);
+    expect(exact.body).toMatchObject({ conversationId, confirmed: ['f0f00002-1111-4111-8111-111111111111'] });
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'active',
+      conversationId
+    });
+  });
+
+  it('recovers the exact leased worker command if a crash loses an early correlation binding before ACK', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'survive the early-correlation crash window' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem(undefined, 'early-correlation-crash-page');
+    const conversationId = 'abababab-3456-7890-abcd-ef1234567890';
+
+    // Model the durable state immediately before the new fast path: the worker invitation and
+    // exact claimed browser command are already on disk, but the worker conversation is not.
+    expect(await persistCriticalSwarmNow()).toBe(true);
+    const invitedSwarm = await readDurable<any>('swarm');
+    expect(invitedSwarm).not.toBeNull();
+    expect((await readDurable<any>('bridge-commands'))?.commands).toContainEqual(expect.objectContaining({
+      id: command.id,
+      phase: 'leased',
+      owner: 'early-correlation-crash-page'
+    }));
+
+    const first = await request('POST', '/correlations', {
+      body: {
+        conversationId,
+        agent: 'worker-1',
+        agentCommandId: command.id,
+        calls: [{ requestId: 'f0f00004-1111-4111-8111-111111111111', messageId: null }]
+      }
+    });
+    expect(first.status).toBe(200);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'active',
+      conversationId
+    });
+
+    // Crash before the debounced swarm write. The safe side is the old invited snapshot plus
+    // the still-leased exact command; restart must therefore be able to bind the same slot again
+    // instead of needing a guessed run/worker fallback.
+    restoreSwarm(invitedSwarm);
+    resetBridgeForTests();
+    await restoreCommands();
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'invited',
+      conversationId: null
+    });
+    expect(pendingCommands()).toContainEqual(expect.objectContaining({ id: command.id }));
+
+    const retry = await request('POST', '/correlations', {
+      body: {
+        conversationId,
+        agent: 'worker-1',
+        agentCommandId: command.id,
+        calls: [{ requestId: 'f0f00005-1111-4111-8111-111111111111', messageId: null }]
+      }
+    });
+    expect(retry.status).toBe(200);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'active',
+      conversationId
+    });
+
+    const ack = await request('POST', '/commands/ack', {
+      body: {
+        id: command.id,
+        status: 'sent',
+        conversationId,
+        client: 'early-correlation-crash-page'
+      }
+    });
+    expect(ack.status).toBe(200);
+    expect(pendingCommands().some((entry) => entry.id === command.id)).toBe(false);
   });
 
   it('keeps the worker command durable until the worker binding itself crosses its crash barrier', async () => {
