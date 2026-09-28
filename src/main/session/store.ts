@@ -36,12 +36,13 @@ import type {
   SessionEvent,
   SessionOrigin,
   SessionSummary,
-  StoredText
+  StoredText,
+  ToolEditReview
 } from '../../shared/session.js';
 import { continuationMarkerOf, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedToolOutcome, storedTextTokens, workSequence } from '../../shared/session.js';
 import { applyTurnIdentity, authoredTimeOf, chronological, injectedUserMessage, positionOf, projectTimeline,
   recordedRequestTurn, responseTurnId, type Chronological, type TimelineTurns } from '../../shared/chronology.js';
-import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
+import { automaticTitle, firstTitleMessage, legacyContextTitle, providerTitleIgnored, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
 import { getConfig } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
@@ -74,6 +75,8 @@ const MAX_LISTED_SESSIONS = 200;
 const MAX_SCANNED_SESSIONS = 5_000;
 /** Keep the uncapped authoritative scan fast without opening thousands of files at once. */
 const ATTACHMENT_CATALOG_READ_CONCURRENCY = 64;
+/** Small shard reads are latency-bound on Windows; keep parallelism bounded to avoid I/O bursts. */
+const CANONICAL_SHARD_READ_CONCURRENCY = 8;
 
 let root = '';
 /**
@@ -629,20 +632,27 @@ async function readCanonicalMessages(id: string, aliasesCollapsed?: () => void):
   // history remains readable from messages.json.
   const shards = path.join(sessionDir(id), 'messages');
   try {
-    const names = await fs.readdir(shards);
-    for (const name of names) {
-      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
-      try {
-        const raw = await fs.readFile(path.join(shards, name), 'utf8');
-        if (Buffer.byteLength(raw, 'utf8') > MAX_CANONICAL_MESSAGE_BYTES) continue;
-        const event = JSON.parse(raw) as CanonicalEvent;
-        const key = messageKey(event);
-        if (!key) continue;
-        const expectedName = `${createHash('sha256').update(key).digest('hex')}.json`;
-        if (expectedName !== name) continue;
-        out.set(key, event);
-      } catch {
-        logWarn(`session ${id}: ignored unreadable canonical message shard ${name}`);
+    const names = (await fs.readdir(shards)).filter(name => /^[0-9a-f]{64}\.json$/.test(name));
+    // Reading thousands of tiny shards serially made the one-time correlation migration spend
+    // tens of seconds in Windows filesystem latency. Eight bounded reads overlap that latency
+    // without opening every shard file at once or changing validation/publication order.
+    for (let offset = 0; offset < names.length; offset += CANONICAL_SHARD_READ_CONCURRENCY) {
+      const batch = await Promise.all(names.slice(offset, offset + CANONICAL_SHARD_READ_CONCURRENCY).map(async name => {
+        try {
+          const raw = await fs.readFile(path.join(shards, name), 'utf8');
+          if (Buffer.byteLength(raw, 'utf8') > MAX_CANONICAL_MESSAGE_BYTES) return null;
+          const event = JSON.parse(raw) as CanonicalEvent;
+          const key = messageKey(event);
+          if (!key) return null;
+          const expectedName = `${createHash('sha256').update(key).digest('hex')}.json`;
+          return expectedName === name ? [key, event] as const : null;
+        } catch {
+          logWarn(`session ${id}: ignored unreadable canonical message shard ${name}`);
+          return null;
+        }
+      }));
+      for (const entry of batch) {
+        if (entry) out.set(entry[0], entry[1]);
       }
     }
   } catch (err) {
@@ -1259,6 +1269,7 @@ export function upsertMessageEvent(
               messageId: previous.messageId,
               authoredAt: authoredTimeOf(previous) ?? event.authoredAt,
               providerMessageId: event.providerMessageId ?? previous.providerMessageId,
+              resolvedModel: event.resolvedModel ?? previous.resolvedModel,
               // `final` is a compatibility mirror of state, not an independent truth.
               state: event.state === 'final' || event.final === true ? 'final' : 'streaming',
               final: event.state === 'final' || event.final === true,
@@ -1330,7 +1341,8 @@ export function upsertMessageEvent(
             previous.state === nextEvent.state &&
             previous.final === nextEvent.final &&
             previous.goalEligible === nextEvent.goalEligible &&
-            previous.providerMessageId === nextEvent.providerMessageId)) &&
+            previous.providerMessageId === nextEvent.providerMessageId &&
+            previous.resolvedModel === nextEvent.resolvedModel)) &&
         (nextEvent.kind !== 'user_message' || previous.kind !== 'user_message' ||
           (nextEvent.reaction === previous.reaction && nextEvent.inputId === previous.inputId && nextEvent.authoredText === previous.authoredText && nextEvent.wireTokenEstimate === previous.wireTokenEstimate && nextEvent.inputDelivery === previous.inputDelivery && JSON.stringify(nextEvent.assets) === JSON.stringify(previous.assets) && JSON.stringify(nextEvent.retiredImageAssetIds) === JSON.stringify(previous.retiredImageAssetIds) && JSON.stringify(nextEvent.attachments) === JSON.stringify(previous.attachments))) &&
         (previous.turnId ?? undefined) === settledTurnId &&
@@ -1737,20 +1749,29 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
   const revision = entry.nextSeq;
   if (entry.summary.conversationId !== conversationId) return null;
   const [recent, questions] = await Promise.all([
-    readRecentEventsFromDisk(sessionId, 256, { kinds: ['turn_start', 'turn_end', 'user_message', 'assistant_message', 'tool_call', 'page_tool'] }),
+    readRecentEventsFromDisk(sessionId, 256, { kinds: ['turn_start', 'turn_end', 'user_message', 'assistant_message', 'native_image', 'tool_call', 'page_tool'] }),
     readRecentEventsFromDisk(sessionId, 1, { kinds: ['user_message'], orderByOrigin: true,
       before: Infinity, acceptEvent: event => !injectedUserMessage(event, entry.summary.timelineTurns) })
   ]);
   if (entry.nextSeq !== revision || entry.summary.conversationId !== conversationId) return null;
   const sameTurn = (left: string | null | undefined, right: string | null | undefined) => !!left && !!right &&
     responseTurnId(entry.summary.timelineTurns, left) === responseTurnId(entry.summary.timelineTurns, right);
-  const final = recent.findLast(event => event.kind === 'assistant_message' && event.final === true &&
+  // Pixels/media alone are not completion. Require the provider's exact terminal
+  // message on a completed lifecycle boundary and its matching recorded image.
+  // These facts may arrive in either batch; never manufacture assistant prose.
+  const imageEnd = (event: SessionEvent) => event.kind === 'turn_end' && event.outcome === 'completed' &&
+    !!event.providerMessageId && !!event.turnId && (!turnId || sameTurn(event.turnId, turnId)) &&
+    recent.some(image => image.kind === 'native_image' && image.messageId === event.providerMessageId &&
+      image.providerStatus === 'finished_successfully' && sameTurn(image.turnId, event.turnId));
+  const final = recent.findLast(event => imageEnd(event) || (event.kind === 'assistant_message' && event.final === true &&
     (!!event.message.text.trim() || !!event.providerMessageId) && !!event.messageId && (!turnId || event.turnId === turnId ||
       (!!event.providerMessageId && sameTurn(event.turnId, turnId)) ||
-      (turnId.startsWith('reply:') && event.messageId === turnId.slice(6))));
-  if (!final || final.kind !== 'assistant_message' || !final.messageId) return null;
-  const seq = final.finalContentSeq ?? positionOf(final);
-  const completedAt = final.finalObservedAt ?? final.time;
+      (turnId.startsWith('reply:') && event.messageId === turnId.slice(6)))));
+  if (!final || (final.kind !== 'assistant_message' && final.kind !== 'turn_end')) return null;
+  const messageId = final.kind === 'turn_end' ? final.providerMessageId : final.messageId;
+  if (!messageId) return null;
+  const seq = final.kind === 'turn_end' ? positionOf(final) : final.finalContentSeq ?? positionOf(final);
+  const completedAt = final.kind === 'turn_end' ? final.time : final.finalObservedAt ?? final.time;
   const question = questions[0];
   const correction = (event: SessionEvent) => isTurnCorrection(event, final.turnId, entry.summary.timelineTurns) && positionOf(event) < seq;
   if (question && positionOf(question) >= positionOf(final) && !correction(question)) return null;
@@ -1770,7 +1791,7 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
       // request or conflicting generation is fresh work, not a trailing result.
       const owner = event.source === 'mcp' && event.call.attribution === 'request_id'
         ? recordedRequestTurn(entry.summary.requestTurns, event.call.requestId, conversationId) : undefined;
-      return !(final.providerMessageId && final.state === 'final' && owner && owner.origin < seq &&
+      return !(final.providerMessageId && (final.kind === 'turn_end' || final.state === 'final') && owner && owner.origin < seq &&
         sameTurn(owner.turnId, final.turnId) && event.call.conversationId === conversationId &&
         (!event.turnId || sameTurn(event.turnId, final.turnId)));
     }
@@ -1779,7 +1800,8 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
     if (event.kind === 'user_message') return !correction(event);
     return event.kind === 'assistant_message' || event.kind === 'page_tool';
   })) return null;
-  return { messageId: final.messageId, turnId: final.turnId ?? null, completedAt, contentSeq: seq, text: final.message.text };
+  return { messageId, turnId: final.turnId ?? null, completedAt, contentSeq: seq,
+    text: final.kind === 'turn_end' ? '' : final.message.text };
 }
 
 /** Recorded local execution, not a native tool label or a request-id sighting alone. */
@@ -2093,6 +2115,28 @@ export async function readHydratedActivityCall(
       event.kind === 'tool_call' && event.call.callId === callId && (!held || event.seq > held.seq) ? event : held, null);
     return newest && exact(newest) ? newest : null;
   });
+}
+
+/** Retrieves one immutable, bounded edit artifact by its durable session/call/index identity. */
+export async function readToolEditReview(sessionId: string, callId: string, changeIndex: number): Promise<ToolEditReview | null> {
+  assertSessionId(sessionId);
+  if (!/^[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(changeIndex) || changeIndex < 0 || changeIndex >= 64) return null;
+  await flushSession(sessionId);
+  const [event] = await readRecentEventsFromDisk(sessionId, 1, {
+    kinds: ['tool_call'], before: Number.POSITIVE_INFINITY,
+    acceptEvent: value => value.kind === 'tool_call' && value.call.callId === callId
+  });
+  if (event?.kind !== 'tool_call' || event.call.callId !== callId) return null;
+  const change = event.call.changes?.[changeIndex];
+  if (!change?.reviewAssetId) return null;
+  const data = await readAsset(sessionId, change.reviewAssetId, 512 * 1024);
+  if (!data) return null;
+  try {
+    const parsed = JSON.parse(data.toString('utf8')) as { before?: unknown; after?: unknown };
+    if (typeof parsed.before !== 'string' || typeof parsed.after !== 'string') return null;
+    return { callId, changeIndex, path: change.path, added: change.added, removed: change.removed,
+      baseText: parsed.before, currentText: parsed.after };
+  } catch { return null; }
 }
 
 /**
@@ -2977,6 +3021,7 @@ export async function renameSession(id: string, title: string, source: SessionSu
       if (conversationId && entry.summary.conversationId !== conversationId) return;
       if (!automaticTitle(entry.summary, firstTitleMessage(entry.messages.values()))) return;
       if (source === 'fallback' && entry.summary.titleSource === 'provider') return;
+      if (source === 'provider' && providerTitleIgnored(entry.summary)) return;
     }
     if (entry.summary.title === title.slice(0, 120) && entry.summary.titleSource === source) return;
     entry.summary.title = title.slice(0, 120);

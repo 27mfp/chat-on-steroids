@@ -215,7 +215,7 @@ import { conversationHasMcpCallSince } from './session/store.js';
 import { sessionWorkingAt } from '../shared/session-activity.js';
 import { requestCorrelation } from './session/correlation.js';
 import { bindAgentWorkspace } from './workspace.js';
-import { shippedExtensionBuild } from './extension-path.js';
+import { extensionUpdateOffer, prepareExtensionUpdate, shippedExtensionBuild } from './extension-path.js';
 
 /** Fixed candidates so the extension can find the app without being told a port. */
 export const DEFAULT_PORTS = BROWSER_BRIDGE_PORTS;
@@ -934,10 +934,12 @@ function noteExtensionVersion(req: http.IncomingMessage): void {
     // somewhere else. Said once per announcement, and only when both ends reported a stamp.
     const shipped = shippedExtensionBuild();
     if (shipped && stamp && stamp !== shipped) {
-      logWarn(
+      // Expected after every app update: the extension updates itself once no chat is busy.
+      // Only an extension loaded from some other folder stays behind and needs a manual reload.
+      logInfo(
         `bridge: the browser is running extension build ${stamp}, but this app ships ${shipped}. ` +
-          'Chrome keeps a service worker alive across a folder change, so reload the extension at ' +
-          'chrome://extensions to pick up the shipped code.'
+          'It updates itself once no chat is busy. If it stays on the old build, Chrome loaded it from a ' +
+          'different folder: load the CoS extension folder again at chrome://extensions.'
       );
     }
     // Even an incompatible peer reports its version before the protocol fence.
@@ -1160,6 +1162,10 @@ function parseObservations(input: unknown): ChatObservation[] {
     // with the page-side assistant bound so the bridge does not silently become the next
     // truncation point after Fiber/content.js accepted the whole message.
     if (typeof item['text'] === 'string') observation.text = item['text'].slice(0, 256_000);
+    // The model the page's own send request named for this message: count proof for Usage.
+    if (kind === 'user_message' && typeof item['model'] === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(item['model'])) {
+      observation.model = item['model'];
+    }
     if (kind === 'user_message' && typeof item['messageId'] === 'string') {
       if (item['reaction'] === null) observation.reaction = null;
       else {
@@ -1179,9 +1185,13 @@ function parseObservations(input: unknown): ChatObservation[] {
       if (!item['messageId'].length || item['messageId'].length > 190) continue;
       observation.messageId = item['messageId'];
     }
-    if (kind === 'assistant_message' && typeof item['providerMessageId'] === 'string' &&
+    if ((kind === 'assistant_message' || (kind === 'turn_end' && item['outcome'] === 'completed')) && typeof item['providerMessageId'] === 'string' &&
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item['providerMessageId'])) {
       observation.providerMessageId = item['providerMessageId'];
+    }
+    if (kind === 'assistant_message' && typeof item['resolvedModel'] === 'string' &&
+        /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(item['resolvedModel'])) {
+      observation.resolvedModel = item['resolvedModel'];
     }
     if (kind === 'native_image') {
       if (typeof item['messageId'] !== 'string' ||
@@ -2019,6 +2029,22 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return json(res, 200, { ok: true }, origin);
   }
 
+  // The offer carries whether this app is running a tool call right now. That, not "a chat has
+  // an agent or an active Goal" (almost always true on a busy install), is what a reload could
+  // cut short; the pages report their own in-flight turns to the extension directly.
+  const extensionUpdateReply = (running: string | null) => {
+    const offer = extensionUpdateOffer(running);
+    return offer ? { ...offer, busy: runningToolCalls() > 0 } : null;
+  };
+  // The extension is idle and about to reload into the build this app ships: bring the folder
+  // Chrome loads from up to date first, and say whether it now holds that build.
+  if (route === '/extension/update' && req.method === 'POST') {
+    const prepared = prepareExtensionUpdate(extensionBuildOf(req));
+    if (prepared?.ready) logInfo(`bridge: extension folder updated to build ${prepared.build}; the extension reloads itself now`);
+    else if (prepared) logWarn(`bridge: could not update the extension folder to build ${prepared.build}`);
+    return json(res, 200, prepared ?? { ready: false }, origin);
+  }
+
   if (route === '/status') {
     const live = liveConversations();
     let openConversations: string[] = [];
@@ -2088,7 +2114,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // replace the visible failure with "Trying" before a renderer could ever observe it.
         repairs: repairFailed ? [] : await takePendingRepairs(),
         ...tabPolicy,
-        recoveryMonitoring: browserRecoveryMonitoring()
+        recoveryMonitoring: browserRecoveryMonitoring(),
+        // A newer extension build ships with this app. The extension reloads into it on its own
+        // when nothing is running; see `/extension/update`.
+        extensionUpdate: extensionUpdateReply(extensionBuildOf(req))
       },
       origin
     );
@@ -7038,8 +7067,8 @@ async function noteRecoveryObservations(
   // A replacement page can first reveal the exact final after a completed end
   // control. That history backfill is not fresh activity, but its canonical
   // final still consumes the current work grant immediately.
-  const observedFinal = observations.some(item => item.kind === 'assistant_message' &&
-    (item.state === 'final' || item.final === true));
+  const observedFinal = observations.some(item => (item.kind === 'assistant_message' &&
+    (item.state === 'final' || item.final === true)) || item.kind === 'native_image');
   const completedFinal = (activity.terminal || observedFinal) && sessionId &&
     await readCompletedFinal(sessionId, conversationId, finalTurn);
   // A short native generation can start and end in one accepted batch. That is
@@ -9546,6 +9575,14 @@ export async function restoreCommands(): Promise<void> {
 }
 
 /** Test seam. */
+/**
+ * Resolves once every open unattributed incident has read its candidates' sessions and armed
+ * its due timer. That read is real I/O, which fake-clock steps in tests never wait for.
+ */
+export async function unattributedIncidentsSettledForTests(): Promise<void> {
+  await Promise.all([...unattributedIncidents.values()].map(incident => incident.ready));
+}
+
 export function resetBridgeForTests(): void {
   clearCompanionDiagnostics();
   for (const command of commands) if (command.timer) clearTimeout(command.timer);

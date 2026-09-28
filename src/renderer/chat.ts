@@ -1,9 +1,10 @@
 import { createWorkspaceTerminal } from './workspace-terminal.js';
+import { createWorkspaceDocks } from './workspace-docks.js';
 import { ui, t } from './i18n.js';
 import { initSkills } from './skills.js';
 import { imageStorageButton } from './image-storage.js';
 import { applyChatModels, applyComposerSessionModel, initChatModels, confirmedComposerModel, composerSendModel, ensureComposerModel } from './chat-models.js';
-import { marked, Marked } from 'marked';
+import { marked, Marked, type TokenizerAndRendererExtension } from 'marked';
 import { safeExternalLink } from '../shared/external-link.js';
 import { createAgentPanel } from './agent-panel.js';
 import { createFilePanel } from './file-panel.js';
@@ -22,6 +23,7 @@ import { renderRecoveryCountdowns } from './recovery.js';
 import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
+import { installComposerHeightMotion } from './composer-motion.js';
 import { sanitizeHtmlTree } from './sanitize-html.js';
 import { isAstraModel } from '../shared/chat-models.js';
 import { supportsFinishAutomation } from '../shared/finish.js';
@@ -66,7 +68,7 @@ import {
 } from '../shared/goal.js';
 import { DEFAULT_HANDOFF_PROMPT, MAX_HANDOFF_PROMPT_CHARS } from '../shared/handoff.js';
 import { browserExtensionRequired, type AppState, type Config } from '../shared/types.js';
-import { $, ago, clockTime, compactNumber, el, filterSettingsSections, icon, run, toast } from './dom.js';
+import { $, ago, clockTime, compactNumber, disclosureChevron, el, filterSettingsSections, icon, run, toast } from './dom.js';
 
 const api = window.api;
 
@@ -143,6 +145,8 @@ function projectGroup(id: string | null | undefined): string | null {
   return id && !projects.find(project => project.id === id)?.ungrouped ? id : null;
 }
 let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
+let rightWorkspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
+let workspaceDocks: ReturnType<typeof createWorkspaceDocks> | null = null;
 
 function selectedLocalProject(): LocalProject | null {
   if (selectedId) {
@@ -174,6 +178,7 @@ function replaceComposerDraft(): void { composerDraftGeneration++; skillPicker?.
 let pendingNewInput: { id: string; generation: number } | null = null;
 let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
 let filePanel: ReturnType<typeof createFilePanel> | null = null;
+let reviewPanel: ReturnType<typeof createFilePanel> | null = null;
 const expandedWorkers = new Set<string>();
 const inputDrafts = new Map<string, string>();
 const newChatTasks = new Map<string, { objective: string; automation: string; loopDelivery: string }>();
@@ -239,14 +244,7 @@ function attachmentCard(file: InputAttachment, inComposer = false): HTMLElement 
     const tile = el('div', 'composer-image'); tile.append(image); return tile;
   }
   const tile = el('div', 'attachment-card'); tile.title = file.name;
-  const glyph = el('span', 'attachment-icon');
-  glyph.setAttribute('aria-hidden', 'true');
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '24'); svg.setAttribute('height', '24');
-  const lines = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  lines.setAttribute('d', 'M7 3h10a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Zm1 6h8M8 13h8M8 17h5');
-  lines.setAttribute('fill', 'none'); lines.setAttribute('stroke', 'currentColor'); lines.setAttribute('stroke-width', '1.6'); lines.setAttribute('stroke-linecap', 'round');
-  svg.append(lines); glyph.append(svg);
+  const glyph = el('span', 'attachment-icon'); glyph.append(icon('i-file-text'));
   const details = el('div', 'attachment-details');
   details.append(el('div', 'attachment-name', file.name), el('div', 'attachment-kind', () => file.mimeType.startsWith('image/') ? t("Image") : t("File")));
   tile.append(glyph, details); return tile;
@@ -668,7 +666,7 @@ function paintSessions(): void {
   const diagnostics: SessionSummary[] = [];
   const group = (key: string, workers: SessionSummary[], parentRow?: HTMLElement, target = rows): void => {
     const button = el('button', 'worker-toggle');
-    button.append(icon('i-chev'));
+    button.append(disclosureChevron());
     ui(button, 'title', () => t("{0} sub-agents · {1} active", [workers.length, workers.filter(sessionWorking).length]));
     ui(button, 'aria-label', () => t("{0} {1} sub-agents", [expandedWorkers.has(key) ? t("Collapse") : t("Expand"), workers.length]));
     button.setAttribute('type', 'button'); button.setAttribute('aria-expanded', String(expandedWorkers.has(key)));
@@ -794,7 +792,10 @@ function paintSessions(): void {
     ?.querySelector<HTMLElement>('.project-heading')?.focus({ preventScroll: true });
   agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
   filePanel?.update(selectedLocalProject());
+  reviewPanel?.update(selectedLocalProject());
+  workspaceDocks?.sync();
   workspaceTerminal?.update(selectedLocalProject());
+  rightWorkspaceTerminal?.update(selectedLocalProject());
   badgeKey = badgeSignature();
   $('projectsEmpty').hidden = projectSections.length > 0;
   $('sessionsEmpty').hidden = rows.length > 0;
@@ -1557,6 +1558,28 @@ function citationLabels(source: string, capture?: StoredText): Map<string, strin
  * heading and list item is a newline, so it keeps `msg`'s pre-wrap — flowing it would run a
  * whole brief together into one paragraph.
  */
+/**
+ * ChatGPT's writing block: `:::writing{variant="…" id="…" title="…"}`, the text, then `:::`.
+ * ChatGPT draws it as a card; as plain Markdown it showed its raw directive. It renders as a
+ * quote with its title in bold, a shape the sanitised message view already styles.
+ */
+const escapeHtml = (value: string): string =>
+  value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+const WRITING_BLOCK: TokenizerAndRendererExtension = {
+  name: 'writingBlock', level: 'block',
+  start: value => value.match(/^:::writing\b/m)?.index,
+  tokenizer(value) {
+    const match = value.match(/^:::writing(\{[^}\n]*\})?[ \t]*\n([\s\S]*?)\n:::[ \t]*(?:\n|$)/);
+    if (!match) return undefined;
+    const title = match[1]?.match(/\btitle="([^"\n]*)"/)?.[1] ?? '';
+    return { type: 'writingBlock', raw: match[0], title, tokens: this.lexer.blockTokens(match[2] ?? '', []) };
+  },
+  renderer(token) {
+    const heading = token['title'] ? `<p><strong>${escapeHtml(String(token['title']))}</strong></p>` : '';
+    return `<blockquote>${heading}${this.parser.parse(token.tokens ?? [])}</blockquote>`;
+  }
+};
+
 export function renderedMarkdown(source: string, capture?: StoredText): HTMLElement {
   // Fiber's canonical text can be complete while a background provider tab still
   // paints its first words. Render this revision directly; captured DOM HTML is
@@ -1564,7 +1587,7 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
   const text = withoutMessageReaction(source).slice(0, MAX_RENDERED_HTML_CHARS);
   const citations = text.includes('\uE200') ? citationLabels(text, capture) : new Map<string, string>();
   // An inline tokenizer leaves literal citation examples inside code spans/fences intact.
-  const parser = new Marked({ gfm: true, extensions: [{
+  const parser = new Marked({ gfm: true, extensions: [WRITING_BLOCK, {
     name: 'providerReference', level: 'inline',
     start: value => value.indexOf('\uE200'),
     tokenizer(value) { const match = value.match(PROVIDER_URL) ?? value.match(PROVIDER_CITATION); return match ? { type: 'providerReference', raw: match[0] } : undefined; },
@@ -1642,6 +1665,24 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
   if (!box.textContent?.trim() && safeFallback) {
     box.classList.remove('rich');
     box.textContent = safeFallback;
+  } else {
+    // Captured provider toolbars are stripped above. Add app-owned controls only after
+    // sanitizing and after the empty-capture fallback has been decided.
+    for (const pre of box.querySelectorAll('pre')) {
+      const value = pre.textContent ?? '';
+      const panel = el('div', 'markdown-code');
+      const header = el('div', 'tool-output-header');
+      header.append(icon('i-terminal', 'ico'), el('strong', '', () => t('Code')));
+      const copy = el('button', 'tool-copy', () => t('Copy')) as HTMLButtonElement;
+      copy.type = 'button';
+      copy.addEventListener('click', () => void (async () => {
+        if (await run(api.writeClipboard(value))) ui(copy, 'textContent', () => t('Copied'));
+        else toast(t('Could not copy text.'));
+      })());
+      header.append(copy);
+      pre.replaceWith(panel);
+      panel.append(header, pre);
+    }
   }
   return box;
 }
@@ -1676,11 +1717,30 @@ function forgetTimelineRows(): void {
   rowCache.clear();
 }
 
+/** Line deltas split so removed lines read in red; any other metric stays one text node. */
+function toolMetric(value: string, className = 'metric'): HTMLElement {
+  const metric = el('span', className);
+  const delta = /^(~?)(\+\d+)?(?:\s+)?([−-]\d+)?$/.exec(value);
+  if (!delta || (!delta[2] && !delta[3])) {
+    metric.textContent = value;
+    return metric;
+  }
+  if (delta[1]) metric.append(delta[1]);
+  if (delta[2]) metric.append(el('span', 'metric-added', delta[2]));
+  if (delta[3]) {
+    if (delta[2]) metric.append(' ');
+    metric.append(el('span', 'metric-removed', delta[3]));
+  }
+  return metric;
+}
+
 function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?: { id: string; current: () => boolean }): HTMLElement {
   const { call } = event;
   const summary = toolCallSummary(call);
   const box = document.createElement('details');
   box.className = `tool tone-${call.summary.tone}`;
+  box.dataset.outcome = call.outcome;
+  if (call.changes?.length || ['exec_command', 'write_stdin', 'apply_patch'].includes(call.tool)) box.classList.add('is-artifact');
   box.open = openTools.has(call.callId);
   box.addEventListener('toggle', () => {
     if (box.open) openTools.add(call.callId);
@@ -1689,9 +1749,39 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
 
   const head = document.createElement('summary');
   head.append(icon(KIND_ICON[call.summary.kind] ?? 'i-bolt', 'ico tool-ico'));
+  if (call.tool === 'exec_command' || call.tool === 'write_stdin') head.append(el('span', 'tool-tag', 'shell'));
+  else if (call.changes?.length || call.tool === 'apply_patch') head.append(el('span', 'tool-tag', 'diff'));
   head.append(el('b', '', call.summary.title));
   if (call.summary.detail) head.append(el('em', '', call.summary.detail));
-  if (summary.metric) head.append(el('span', 'metric', summary.metric));
+  if (call.changes?.length) {
+    const added = call.changes.reduce((total, change) => total + change.added, 0);
+    const removed = call.changes.reduce((total, change) => total + change.removed, 0);
+    const approximate = call.changes.some(change => change.approximate);
+    const count = toolMetric(`+${added} −${removed}`, 'tool-change-count');
+    if (approximate) count.append(el('span', '', () => t(' (approx.)')));
+    head.append(count);
+  }
+  if (summary.metric) head.append(toolMetric(summary.metric));
+  const project = context ? null : selectedLocalProject();
+  const sessionId = context ? null : selectedId;
+  const reviewIndices = call.outcome === 'ok' ? (call.changes ?? []).flatMap((change, index) =>
+    change.reviewAssetId ? [index] : []).slice(0, 8) : [];
+  if (project && sessionId && reviewIndices.length) {
+    const review = el('button', 'tool-open-diff') as HTMLButtonElement;
+    review.type = 'button';
+    review.append(icon('i-git-diff'));
+    ui(review, 'title', () => t('Review this edit'));
+    ui(review, 'aria-label', () => t('Review this edit'));
+    review.addEventListener('click', click => {
+      click.preventDefault();
+      click.stopPropagation();
+      if (selectedId !== sessionId || selectedLocalProject()?.id !== project.id) return;
+      void reviewPanel?.openReview(project.id, sessionId, call.callId, reviewIndices).then(opened => {
+        if (!opened) toast(t('Recorded edit is unavailable.'));
+      });
+    });
+    head.append(review);
+  }
   box.append(head);
 
   // Collapsed calls only need their headline. Large recorded results must not
@@ -1776,6 +1866,20 @@ async function fillTimelineHistory(): Promise<void> {
 function appendToolOutput(box: HTMLDetailsElement, { call }: Extract<SessionEvent, { kind: 'tool_call' }>,
   context?: { id: string; current: () => boolean }): void {
   const raw = el('div', 'raw');
+  const appendText = (label: () => string, value: string, truncated: boolean, chars: number) => {
+    const panel = el('div', 'tool-output');
+    const header = el('div', 'tool-output-header');
+    header.append(icon(KIND_ICON[call.summary.kind] ?? 'i-terminal', 'ico'), el('strong', '', label));
+    const copy = el('button', 'tool-copy', () => t('Copy')) as HTMLButtonElement;
+    copy.type = 'button';
+    copy.addEventListener('click', () => void (async () => {
+      if (await run(api.writeClipboard(value))) ui(copy, 'textContent', () => t('Copied'));
+      else toast(t('Could not copy text.'));
+    })());
+    header.append(copy);
+    panel.append(header, textBlock('pre', value, truncated, chars));
+    raw.append(panel);
+  };
   const facts = el('p', 'raw-facts');
   ui(facts, 'textContent', () => `${call.tool} · ${call.outcome} · ${Math.round(call.durationMs)} ms · ` +
     t("placed by {0}", [ATTRIBUTION_LABELS[call.attribution] ?? call.attribution]));
@@ -1786,19 +1890,18 @@ function appendToolOutput(box: HTMLDetailsElement, { call }: Extract<SessionEven
     for (const change of call.changes) {
       const li = el('li');
       li.append(el('code', '', change.path));
-      const counts = `+${change.added} −${change.removed}${change.approximate ? t(" (approx.)") : ''}`;
-      li.append(el('span', 'metric', counts));
+      const counts = toolMetric(`+${change.added} −${change.removed}`);
+      if (change.approximate) counts.append(t(" (approx.)"));
+      li.append(counts);
       changes.append(li);
     }
     raw.append(changes);
   }
 
-  raw.append(el('h4', '', () => t("Arguments")));
-  raw.append(textBlock('pre', call.args.text, call.args.truncated, call.args.chars));
-  raw.append(el('h4', '', () => t("Result")));
+  appendText(() => `${t('Arguments')} · ${call.tool}`, call.args.text, call.args.truncated, call.args.chars);
   const images = call.assets?.filter(asset => ['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType)) ?? [];
   const readable = toolResultText(call.result.text, call.result.truncated, images.length > 0);
-  if (readable) raw.append(textBlock('pre', readable, call.result.truncated && images.length === 0, call.result.chars));
+  if (readable) appendText(() => `${t('Result')} · ${call.tool} · ${Math.round(call.durationMs)} ms`, readable, call.result.truncated && images.length === 0, call.result.chars);
   // Older recordings did not retain the reason an image asset was omitted. Explain
   // the missing local preview without inferring a historical provider receipt.
   if (call.tool === 'view_image' && call.outcome === 'ok' && images.length === 0) {
@@ -2517,6 +2620,44 @@ function reconcileChildren(parent: Element, children: HTMLElement[]): void {
     cursor = child.nextSibling;
   }
 }
+/** Fold presentation noise without merging or dropping any recorded call. */
+function foldRoutineActivity(rows: HTMLElement[]): HTMLElement[] {
+  const result: HTMLElement[] = [];
+  const retained = new Set<HTMLDetailsElement>();
+  const routineTitle = (row: HTMLElement) => row.querySelector('.tool[data-outcome="ok"] > summary b')?.textContent ?? '';
+  for (let i = 0; i < rows.length;) {
+    const title = routineTitle(rows[i]!);
+    if (title !== 'Checked agent status' && !title.startsWith('Waited on session ')) {
+      result.push(rows[i++]!); continue;
+    }
+    let end = i + 1;
+    while (end < rows.length && routineTitle(rows[end]!) === title) end++;
+    if (end - i < 5) { result.push(...rows.slice(i, end)); i = end; continue; }
+    const members = rows.slice(i, end);
+    const previous = members.map(row => row.closest<HTMLDetailsElement>('.routine-activity'))
+      .find((fold): fold is HTMLDetailsElement => !!fold && !retained.has(fold));
+    const fold = previous ?? document.createElement('details');
+    retained.add(fold);
+    if (!previous) {
+      fold.className = 'routine-activity';
+      fold.open = openTools.has(`routine:${members[0]!.dataset.timelineKey}`);
+      fold.addEventListener('toggle', () => {
+        const key = `routine:${fold.dataset.firstKey}`;
+        if (fold.open) openTools.add(key); else openTools.delete(key);
+      });
+      fold.append(el('summary'), el('div', 'routine-activity-body'));
+    }
+    fold.dataset.firstKey = members[0]!.dataset.timelineKey;
+    fold.querySelector('summary')!.replaceChildren(
+      el('span', 'routine-symbol', '↺'),
+      el('span', 'activity-title', title),
+      el('span', 'routine-count', `×${members.length}`)
+    );
+    reconcileChildren(fold.lastElementChild!, members);
+    result.push(fold); i = end;
+  }
+  return result;
+}
 function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGroups): HTMLElement[] {
   const grouped: HTMLElement[] = [], retained = new Set<string>();
   for (let i = 0; i < rows.length;) {
@@ -2535,19 +2676,23 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
       group = document.createElement('details'); group.className = 'tool-group';
       group.dataset.timelineKey = key;
       const summary = document.createElement('summary');
-      summary.append(el('span', 'activity-symbol'), el('span', 'activity-title'), icon('i-chev', 'ico activity-chevron'));
+      summary.append(el('span', 'activity-symbol'), el('span', 'activity-title'), disclosureChevron('ico activity-chevron'));
       group.append(summary, el('div', 'tool-group-body'));
       group.addEventListener('toggle', () => { if (group!.open) openTools.add(key); else openTools.delete(key); });
       group.open = openTools.has(key) || rows.slice(i, end).some((row) => row.querySelector('details[open]')); groups.set(key, group);
     }
     const latest = rows[end - 1]!;
     const latestHead = latest.querySelector('.tool > summary, .agent-communication > summary, .thinking-line');
-    const label = latestHead?.querySelector('b, span:not(.agent-avatar)')?.textContent || t("Activity");
+    const observedPhase = rows[i - 1]?.matches('.ev-progress')
+      ? rows[i - 1]!.querySelector('.is-progress')?.textContent?.trim() : '';
+    const label = observedPhase || latestHead?.querySelector('b')?.textContent
+      || latestHead?.querySelector('span:not(.agent-avatar)')?.textContent || t("Activity");
+    group.classList.toggle('has-activity-phase', !!observedPhase);
     group.querySelector('.activity-title')!.textContent = label;
     ui(group.querySelector('summary')!, 'title', () => t("{0} actions · {1}", [end - i, label]));
-    const symbol = latestHead?.querySelector('svg, .agent-avatar');
+    const symbol = latestHead?.querySelector('.ico, .agent-avatar');
     group.querySelector('.activity-symbol')!.replaceChildren(...(symbol ? [symbol.cloneNode(true)] : []));
-    reconcileChildren(group.lastElementChild!, rows.slice(i, end));
+    reconcileChildren(group.lastElementChild!, foldRoutineActivity(rows.slice(i, end)));
     grouped.push(group); i = end;
   }
   for (const key of groups.keys()) if (!retained.has(key)) groups.delete(key);
@@ -2843,6 +2988,30 @@ function badgeSignature(): string {
  */
 const BLIND_CAPTION_MS = 90_000;
 
+// Opt-in (Settings → Playful status words). Kept in English: they are wordplay, not labels.
+const TURN_WORK_WORDS = [
+  'Pumping tokens', 'Juicing context', 'Bulking output', 'Repping prompts', 'Spotting agents',
+  'Loading creatine', 'Chasing gains', 'Flexing neurons', 'TRT mode', 'Testosterone boost',
+  'Tren thoughts', 'Deca stack', 'Anavar cutting', 'Dianabol bulking', 'Winstrol drying',
+  'Primobolan polishing', 'Pissing OpenAI off a little more', 'Clauding deez nuts',
+  'Warming up the GPUs', 'Deadlifting the context window', 'Carb-loading tokens', 'Doing reps on the repo',
+  'Hitting a new PR', 'Skipping leg day', 'Pre-workout kicking in', 'Protein-shaking the stack trace',
+  'Benching the build', 'Spotting the next token', 'Stretching the attention span', 'Counting macros',
+  'Pumping iron and ideas', 'Cutting the fluff', 'Going beast mode', 'One more set',
+  'Oiling up the prompt', 'Flexing for the mirror', 'Grinding through the backlog', 'Chugging creatine', 'No pain, no merge'
+] as const;
+
+/** Stable per turn, then advances every five seconds so it reads as authored rather than jittery. */
+function turnWorkWord(turnId: string, elapsedSeconds: number): string {
+  let seed = 0;
+  for (const character of turnId) seed = (seed * 31 + character.charCodeAt(0)) >>> 0;
+  return TURN_WORK_WORDS[(seed + Math.floor(elapsedSeconds / 5)) % TURN_WORK_WORDS.length]!;
+}
+
+function workingLabel(turnId: string, elapsedSeconds: number): string {
+  return deps.state()?.config.ui.playfulStatus === true ? turnWorkWord(turnId, elapsedSeconds) : t("Working");
+}
+
 function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad'; working?: boolean; ticking?: boolean } {
   if (!deps.state()?.config.ui.developerMode) {
     const summary = sessions.find(entry => entry.id === selectedId);
@@ -2876,11 +3045,13 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad'; working?:
     const startedAt = summary.finishTurn?.turnId === turnId ? summary.finishTurn.startedAt
       : events.find(event => event.kind === 'turn_start' && event.turnId === turnId)?.time;
     const endedAt = events.find(event => event.kind === 'turn_end' && event.turnId === turnId)?.time;
-    if (startedAt === undefined) return active ? { text: t("Working…"), tone: '', working: true } : blind ?? { text: '', tone: '' };
+    if (startedAt === undefined) return active
+      ? { text: deps.state()?.config.ui.playfulStatus === true ? `${turnWorkWord(turnId, 0)}…` : t("Working…"), tone: '', working: true }
+      : blind ?? { text: '', tone: '' };
     if (!active && endedAt === undefined) return blind ?? { text: '', tone: '' };
     if (blind) return blind;
     const seconds = Math.max(0, Math.floor(((active ? Date.now() : endedAt!) - startedAt) / 1000));
-    return { text: t("{0} for {1}{2}s", [active ? t("Working") : t("Worked"), seconds >= 60 ? `${t('{0}m', [Math.floor(seconds / 60)])} ` : '', seconds % 60]), tone: '', working: !!active, ticking: !!active };
+    return { text: t("{0} for {1}{2}s", [active ? workingLabel(turnId, seconds) : t("Worked"), seconds >= 60 ? `${t('{0}m', [Math.floor(seconds / 60)])} ` : '', seconds % 60]), tone: '', working: !!active, ticking: !!active };
   }
   // Recording follows the conversation the browser can see. A tool call arrives over the
   // connector carrying nothing that identifies its caller, so work driven from the phone,
@@ -4095,19 +4266,19 @@ export function initChat(next: Deps): void {
       .map(entry => ({ id: entry.id, scope: projectGroup(entry.projectId) ?? '' }))
   ], paintSessions);
   deps = next;
-  const fileToggle = el('button', 'btn file-panel-toggle') as HTMLButtonElement;
-  fileToggle.id = 'filePanelToggle'; fileToggle.type = 'button'; fileToggle.hidden = true;
-  fileToggle.append(icon('i-folder'));
-  ui(fileToggle, 'aria-label', () => t('Toggle Files side panel')); fileToggle.setAttribute('aria-expanded', 'false');
-  const agentToggle = el('button', 'btn btn-icon', '◫') as HTMLButtonElement;
-  agentToggle.id = 'agentPanelToggle'; agentToggle.type = 'button'; agentToggle.hidden = true;
-  ui(agentToggle, 'aria-label', () => t("Toggle sub-agent side panel")); agentToggle.setAttribute('aria-expanded', 'false');
-  $('headerConnect').after(fileToggle, agentToggle);
+  const stopComposerHeightMotion = installComposerHeightMotion($('composer'));
+  window.addEventListener('beforeunload', stopComposerHeightMotion, { once: true });
+  const chatHost = document.querySelector<HTMLElement>('[data-panel="chat"]')!;
+  const docks = createWorkspaceDocks(chatHost);
+  workspaceDocks = docks;
   const agentToolGroups = new Map<string, HTMLDetailsElement>();
   agentPanel = createAgentPanel({
-    host: document.querySelector<HTMLElement>('[data-panel="chat"]')!, toggle: agentToggle,
-    onShow: () => filePanel?.hide(),
+    host: chatHost, mount: docks.body,
+    onShow: () => { filePanel?.hide(); docks.adopt('agents'); },
+    onEscape: () => { docks.setOpen(false); docks.rightToggle.focus(); },
     load: id => run(api.getSession(id, { limit: 160 })), openMain: selectSession, working: sessionWorking,
+    agent: worker => swarm?.agents.find(entry => entry.role === 'worker' && entry.id === worker.origin?.agentId &&
+      !!entry.conversationId && entry.conversationId === worker.conversationId) ?? null,
     render: (source, id, current) => {
       let boundary = '';
       const rows = foldAgentCommunication(source).flatMap(event => {
@@ -4280,16 +4451,45 @@ export function initChat(next: Deps): void {
     return true;
   };
   filePanel = createFilePanel({
-    host: document.querySelector<HTMLElement>('[data-panel="chat"]')!, toggle: fileToggle,
-    onShow: () => agentPanel?.hide(),
+    host: chatHost, mount: docks.body,
+    onShow: () => { agentPanel?.hide(); docks.adopt('files'); },
+    onOpenChanges: () => docks.activate('review'),
+    onEscape: () => { docks.setOpen(false); docks.rightToggle.focus(); },
     captureAttachment: () => {
       const owner = composerDraftOwner();
       return attachment => appendImages(owner, [attachment]);
     }
   });
   filePanel.update(selectedLocalProject());
-  workspaceTerminal = createWorkspaceTerminal();
+  reviewPanel = createFilePanel({
+    host: chatHost, mount: docks.body, reviewOnly: true,
+    onShow: () => docks.adopt('review'),
+    onEscape: () => { docks.setOpen(false); docks.rightToggle.focus(); }
+  });
+  reviewPanel.update(selectedLocalProject());
+  workspaceTerminal = createWorkspaceTerminal(() => docks.toggleBottomTerminal(), docks.bottomBody,
+    { onEmpty: () => docks.setBottomOpen(false), onClosePanel: () => docks.setBottomOpen(false) });
   workspaceTerminal.update(selectedLocalProject());
+  rightWorkspaceTerminal = createWorkspaceTerminal(() => docks.toggleBottomTerminal(), docks.body,
+    { id: 'workspaceTerminalRight', dockedTabs: true, onTabsChanged: () => docks.sync() });
+  rightWorkspaceTerminal.update(selectedLocalProject());
+  docks.register('review', 'Review', 'i-git-diff', mount => {
+    reviewPanel?.mountAt(mount); void reviewPanel?.show();
+  }, () => reviewPanel?.hide(), () => selectedLocalProject() !== null);
+  docks.registerTerminal({
+    show: (mount, createIfEmpty) => rightWorkspaceTerminal?.show(mount, createIfEmpty),
+    hide: () => rightWorkspaceTerminal?.hide(), canCreate: () => true,
+    newTab: () => rightWorkspaceTerminal?.newTab() ?? null,
+    tabs: () => rightWorkspaceTerminal?.tabs() ?? [],
+    selectTab: id => rightWorkspaceTerminal?.selectTab(id), closeTab: id => rightWorkspaceTerminal?.closeTab(id)
+  }, {
+    show: (mount, createIfEmpty) => workspaceTerminal?.show(mount, createIfEmpty),
+    hide: () => workspaceTerminal?.hide()
+  });
+  docks.register('files', 'Files', 'i-folder', mount => {
+    filePanel?.mountAt(mount); void filePanel?.show();
+  }, () => filePanel?.hide(), () => selectedLocalProject() !== null);
+  docks.register('agents', 'Sub-agents', 'i-agents', () => agentPanel?.show(), () => agentPanel?.hide(), () => selectedId !== null);
   $('attachImages').addEventListener('click', async () => {
     const owner = composerDraftOwner();
     appendImages(owner, await run(api.chooseFiles()));

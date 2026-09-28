@@ -7,8 +7,19 @@ import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import type { Handoff, SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import type { LocalProject } from '../src/shared/projects.js';
-vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ update: vi.fn() }) }));
+vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({
+  update: vi.fn(), show: vi.fn(), hide: vi.fn(), hasTabs: () => false,
+  tabs: () => [], newTab: () => null, selectTab: vi.fn(), closeTab: vi.fn()
+}) }));
 vi.mock('../src/renderer/pet.js', () => ({ initPet: () => () => {} }));
+vi.mock('../src/renderer/file-code-editor.js', () => ({
+  createProjectDiffViewer: async ({ parent, baseText, currentText }: { parent: HTMLElement; baseText: string; currentText: string }) => {
+    const view = parent.ownerDocument.createElement('pre');
+    view.textContent = `${baseText}\n---\n${currentText}`;
+    parent.append(view);
+    return { destroy: () => view.remove(), language: 'TypeScript' };
+  }
+}));
 import { positionOf, projectTimeline } from '../src/shared/chronology.js';
 
 /**
@@ -154,7 +165,7 @@ async function settleHistoryFrame(w: Pick<Window, 'requestAnimationFrame'>): Pro
   await settle();
 }
 
-async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers: Array<{ id: string; sourceSessionId: string }> = [], projects: LocalProject[] = [], options: { origin?: SessionSummary["origin"]; developerMode?: boolean; sessions?: SessionSummary[]; pro?: boolean; astra?: boolean; reserveOpenings?: boolean; handoff?: Handoff | null } = {}) {
+async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers: Array<{ id: string; sourceSessionId: string }> = [], projects: LocalProject[] = [], options: { origin?: SessionSummary["origin"]; developerMode?: boolean; playfulStatus?: boolean; sessions?: SessionSummary[]; pro?: boolean; astra?: boolean; reserveOpenings?: boolean; handoff?: Handoff | null } = {}) {
   const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
   dom = new JSDOM(html, { url: 'https://local.test/', pretendToBeVisual: true });
   const w = dom.window;
@@ -185,7 +196,7 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
     },
     commandAllowlist: { enabled: false, mode: 'allow' as const, rules: [] as string[] },
     tunnel: { kind: 'openai', tunnelId: 'tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', desktopTunnelId: '', binaryPath: '' },
-    ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'light', developerMode: options.developerMode ?? false },
+    ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'light', developerMode: options.developerMode ?? false, playfulStatus: options.playfulStatus ?? false },
     sessions: { record: true, retainDays: 30, advisoryTokens: 300000, limitTokens: 400000 },
     compaction: { auto: true, autoTokens: 300000 },
     multiAgent: { enabled: false, maxWorkers: 2, allowUnattributedCalls: false, recoverAgentTabs: true },
@@ -338,6 +349,18 @@ it('makes parent and worker session selectors keyboard-focusable and activates t
   expect(activate.defaultPrevented).toBe(true);
   await settle();
   expect(w.document.querySelector(`.sess.is-sel[data-id="${worker.id}"]`)).not.toBeNull();
+});
+
+it('keeps legacy Files, Agents and Review toggles out of the chat while dock controls remain available', async () => {
+  const project: LocalProject = { id: '33333333-3333-4333-8333-333333333333', name: 'Workspace', path: '/workspace', createdAt: T0 };
+  const { w } = await boot([], false, [], [project]);
+  const chat = w.document.querySelector('[data-panel="chat"]')!;
+  expect(chat.querySelectorAll('#filePanelToggle, #agentPanelToggle, .file-panel-toggle')).toHaveLength(0);
+  expect([...chat.children].filter(node => node.tagName === 'BUTTON')).toHaveLength(0);
+  expect(w.document.getElementById('rightDockToggle')).not.toBeNull();
+  expect(w.document.getElementById('terminalToggle')).not.toBeNull();
+  w.document.getElementById('rightDockToggle')!.click();
+  expect(w.document.getElementById('workDockRight')?.hidden).toBe(false);
 });
 
 it('patches native reactions in place and hides streamed envelopes without changing authored messages', async () => {
@@ -1777,6 +1800,38 @@ it('keeps Projects and Chats separate while preserving disclosure state through 
   expect(projects.open).toBe(false);
 });
 
+it('reviews only an exact recorded edit without expanding its tool row or querying Git', async () => {
+  const project: LocalProject = { id: '33333333-3333-4333-8333-333333333333', name: 'Workspace', path: '/workspace', createdAt: T0 };
+  const edit = toolCall(2, 'edit-one');
+  if (edit.kind !== 'tool_call') throw new Error('Expected a tool call');
+  edit.call.tool = 'apply_patch';
+  edit.call.summary = { kind: 'edit', title: 'Edited src/main.ts', metric: '+1 −1', tone: 'good' };
+  edit.call.changes = [{ path: '/repo/src/main.ts', added: 1, removed: 1, approximate: false, reviewAssetId: 'deadbeef.txt' }];
+  const app = await boot([edit], true, [], [project]);
+  const ok = <T>(data: T) => Promise.resolve({ ok: true as const, data });
+  const reviewCall = vi.fn(() => ok({ callId: edit.call.callId, changeIndex: 0, path: 'src/main.ts', added: 1, removed: 1,
+    baseText: 'before', currentText: 'after' }));
+  app.w.api.getToolEditReview = reviewCall;
+  const row = app.w.document.querySelector<HTMLDetailsElement>('details.tool')!;
+  const review = row.querySelector<HTMLButtonElement>('.tool-open-diff')!;
+  expect(review.getAttribute('aria-label')).toBe('Review this edit');
+  review.click(); await settle();
+  expect(row.open).toBe(false);
+  expect(reviewCall).toHaveBeenCalledWith(expect.any(String), edit.call.callId, 0);
+  expect(app.w.document.querySelector<HTMLElement>('.review-panel .file-changes-view')?.hidden).toBe(false);
+  expect(app.w.document.querySelector('.review-panel .file-preview-meta')?.textContent).toContain('This edit');
+});
+
+it('does not offer a project diff shortcut in an unfiled chat', async () => {
+  const edit = toolCall(2, 'edit-unfiled');
+  if (edit.kind !== 'tool_call') throw new Error('Expected a tool call');
+  edit.call.tool = 'apply_patch';
+  edit.call.summary = { kind: 'edit', title: 'Edited src/main.ts', metric: '+1 −1', tone: 'good' };
+  edit.call.changes = [{ path: '/repo/src/main.ts', added: 1, removed: 1, approximate: false, reviewAssetId: 'deadbeef.txt' }];
+  const app = await boot([edit]);
+  expect(app.w.document.querySelector('.tool-open-diff')).toBeNull();
+});
+
 it('starts in New Chat despite active history and selects only the exact acknowledged send', async () => {
   const app = await boot([], false);
   const { w, live } = app;
@@ -1864,7 +1919,7 @@ it.each([false, true])('dismisses retired delivery errors in selected-chat=%s wi
   const retry = queue.querySelector<HTMLButtonElement>('[aria-label="Retry delivery"]')!;
   expect(retry.classList.contains('delivery-retry')).toBe(true);
   expect(retry.textContent).toBe('');
-  expect(retry.querySelector('use')?.getAttribute('href')).toBe('#i-retry');
+  expect(retry.querySelector('.ico.ph-arrow-clockwise')).not.toBeNull();
   expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).not.toBe('Cancel delivery');
   (queue.querySelector('[title="Dismiss delivery notice"]') as HTMLButtonElement).click();
   await app.append([]);
@@ -2108,6 +2163,43 @@ it('keeps an unfolded tool row as the same open node while the chat keeps append
   expect(group.querySelector('summary')!.title).toContain('4 actions');
 });
 
+it('colors removed lines separately from added lines without changing other tool metrics', async () => {
+  const edit = toolCall(1, 'edit-lines') as Extract<SessionEvent, { kind: 'tool_call' }>;
+  edit.call.tool = 'apply_patch';
+  edit.call.summary = { kind: 'edit', tone: 'good', title: 'Edited 2 files', metric: '+28 −11' };
+  edit.call.changes = [{ path: '/repo/file.ts', added: 28, removed: 11, approximate: false }];
+  const removal = toolCall(2, 'removed-lines') as Extract<SessionEvent, { kind: 'tool_call' }>;
+  removal.call.tool = 'apply_patch';
+  removal.call.summary = { kind: 'delete', tone: 'warn', title: 'Deleted file.ts', metric: '~−7' };
+  removal.call.changes = [{ path: '/repo/removed.ts', added: 0, removed: 7, approximate: true }];
+  const read = toolCall(3, 'read-lines') as Extract<SessionEvent, { kind: 'tool_call' }>;
+  read.call.summary = { kind: 'read', tone: 'neutral', title: 'Read file.ts', metric: '12 lines' };
+
+  const { w } = await boot([edit, removal, read]);
+  const rows = [...w.document.querySelectorAll<HTMLDetailsElement>('details.tool')];
+  expect(rows).toHaveLength(3);
+  expect(rows[0]!.querySelector('summary .metric')?.textContent).toBe('+28 −11');
+  expect(rows[0]!.querySelector('summary .metric-added')?.textContent).toBe('+28');
+  expect(rows[0]!.querySelector('summary .metric-removed')?.textContent).toBe('−11');
+  // The per-call change count beside the title splits the same way.
+  expect(rows[0]!.querySelector('summary .tool-change-count .metric-added')?.textContent).toBe('+28');
+  expect(rows[0]!.querySelector('summary .tool-change-count .metric-removed')?.textContent).toBe('−11');
+  expect(rows[1]!.querySelector('summary .metric')?.textContent).toBe('~−7');
+  expect(rows[1]!.querySelector('summary .metric-removed')?.textContent).toBe('−7');
+  expect(rows[2]!.querySelector('summary .metric')?.textContent).toBe('12 lines');
+  expect(rows[2]!.querySelector('summary .metric-added, summary .metric-removed')).toBeNull();
+
+  rows[0]!.open = true;
+  rows[0]!.dispatchEvent(new w.Event('toggle'));
+  expect(rows[0]!.querySelector('.changes .metric')?.textContent).toBe('+28 −11');
+  expect(rows[0]!.querySelector('.changes .metric-added')?.textContent).toBe('+28');
+  expect(rows[0]!.querySelector('.changes .metric-removed')?.textContent).toBe('−11');
+  rows[1]!.open = true;
+  rows[1]!.dispatchEvent(new w.Event('toggle'));
+  expect(rows[1]!.querySelector('.changes .metric')?.textContent).toBe('+0 −7 (approx.)');
+  expect(rows[1]!.querySelector('.changes .metric-removed')?.textContent).toBe('−7');
+});
+
 it('keeps mixed tool and agent activity in one latest-action disclosure between authored messages', async () => {
   const { w, append } = await boot([
     { seq: 1, time: T0, source: 'extension', kind: 'progress', message: text('Checking the implementation') },
@@ -2118,7 +2210,7 @@ it('keeps mixed tool and agent activity in one latest-action disclosure between 
   const timeline = w.document.getElementById('timeline')!;
   const group = timeline.querySelector<HTMLDetailsElement>('.tool-group')!;
   expect(group.open).toBe(false);
-  expect(group.querySelector('.activity-title')!.textContent).toBe('Read README.md');
+  expect(group.querySelector('.activity-title')!.textContent).toBe('Checking the implementation');
   expect(group.querySelector('.agent-communication summary')!.textContent).toContain('Message from worker-2');
   expect(group.querySelector('.agent-avatar')).not.toBeNull();
   expect(group.querySelectorAll('.ev')).toHaveLength(3);
@@ -2128,6 +2220,43 @@ it('keeps mixed tool and agent activity in one latest-action disclosure between 
   ]);
   expect(timeline.querySelectorAll('.tool-group')).toHaveLength(2);
   expect(timeline.children[0]!.className).toContain('ev-progress');
+});
+
+it('folds five consecutive status polls while retaining each exact tool row', async () => {
+  const status = (seq: number): SessionEvent => {
+    const event = toolCall(seq, `status-${seq}`) as Extract<SessionEvent, { kind: 'tool_call' }>;
+    return { ...event, call: { ...event.call, tool: 'agents', summary: { kind: 'agent', tone: 'neutral', title: 'Checked agent status' } } };
+  };
+  const { w, append } = await boot([status(1), status(2), status(3), status(4)]);
+  const timeline = w.document.getElementById('timeline')!;
+  expect(timeline.querySelector('.routine-activity')).toBeNull();
+  await append([status(5)]);
+  const fold = timeline.querySelector<HTMLDetailsElement>('.routine-activity')!;
+  expect(fold.querySelector('.routine-count')!.textContent).toBe('×5');
+  expect(fold.querySelectorAll('.ev-tool_call')).toHaveLength(5);
+  fold.open = true;
+  fold.dispatchEvent(new w.Event('toggle'));
+  await append([status(6)]);
+  expect(timeline.querySelector('.routine-activity')).toBe(fold);
+  expect(fold.open).toBe(true);
+  expect(fold.querySelectorAll('.ev-tool_call')).toHaveLength(6);
+  expect(fold.querySelector('.routine-count')!.textContent).toBe('×6');
+  const failed = status(7) as Extract<SessionEvent, { kind: 'tool_call' }>;
+  await append([{ ...failed, call: { ...failed.call, outcome: 'tool_rejected', summary: { ...failed.call.summary, tone: 'bad' } } }]);
+  expect(fold.querySelectorAll('.ev-tool_call')).toHaveLength(6);
+  expect(timeline.querySelectorAll('.ev-tool_call')).toHaveLength(7);
+});
+
+it('keeps an artifact action as the activity title rather than its tool tag', async () => {
+  const shell = toolCall(3, 'shell') as Extract<SessionEvent, { kind: 'tool_call' }>;
+  const { w } = await boot([toolCall(2, 'read'), { ...shell, call: {
+    ...shell.call, tool: 'exec_command', summary: { kind: 'run', tone: 'good', title: 'Ran build checks' },
+    changes: [{ path: 'src/app.ts', added: 2, removed: 1, approximate: true }]
+  } }]);
+  const group = w.document.querySelector('.tool-group')!;
+  expect(group.querySelector('.activity-title')!.textContent).toBe('Ran build checks');
+  expect(group.querySelector('.tool-tag')!.textContent).toBe('shell');
+  expect(group.querySelector('.tool-change-count')!.textContent).toContain('approx.');
 });
 
 it('controls the selected session without submitting another user message', async () => {
@@ -3812,4 +3941,16 @@ it('keeps the latest recovery verdict in view until the chat works again', async
 it('does not show a handoff note as a recovery verdict', async () => {
   const app = await boot([{ seq: 1, time: T0 + 1000, source: 'app', kind: 'note', continuation: TOKEN, message: text('Compact & Resume abandoned') }] as SessionEvent[]);
   expect(app.w.document.getElementById('recoveryStatus')!.hidden).toBe(true);
+});
+
+const PLAYFUL_WORDS = /^(Pumping tokens|Juicing context|Bulking output|Repping prompts|Spotting agents|Loading creatine|Chasing gains|Flexing neurons|TRT mode|Testosterone boost|Tren thoughts|Deca stack|Anavar cutting|Dianabol bulking|Winstrol drying|Primobolan polishing|Pissing OpenAI off a little more|Clauding deez nuts|Warming up the GPUs|Deadlifting the context window|Carb-loading tokens|Doing reps on the repo|Hitting a new PR|Skipping leg day|Pre-workout kicking in|Protein-shaking the stack trace|Benching the build|Spotting the next token|Stretching the attention span|Counting macros|Pumping iron and ideas|Cutting the fluff|Going beast mode|One more set|Oiling up the prompt|Flexing for the mirror|Grinding through the backlog|Chugging creatine|No pain, no merge) for /;
+
+it('keeps the plain Working label unless playful status words are turned on', async () => {
+  const { w } = await boot([{ seq: 1, time: T0, source: 'extension', kind: 'turn_start', turnId: 'held-turn' }]);
+  expect(w.document.getElementById('chatState')!.textContent).toMatch(/^Working for /);
+});
+
+it('uses a playful work word when it is turned on in Settings', async () => {
+  const { w } = await boot([{ seq: 1, time: T0, source: 'extension', kind: 'turn_start', turnId: 'held-turn' }], true, [], [], { playfulStatus: true });
+  expect(w.document.getElementById('chatState')!.textContent).toMatch(PLAYFUL_WORDS);
 });

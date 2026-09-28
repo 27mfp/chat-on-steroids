@@ -27,6 +27,18 @@ afterAll(() => {
 });
 
 describe('captured ChatGPT rendered HTML', () => {
+  it('renders ChatGPT\'s writing block as a titled quote instead of its raw directive', () => {
+    const rendered = renderedMarkdown(':::writing{variant="standard" id="58321" title="Clear <rewrite>"}\nWe want the app to be **faster**.\n:::\n\nAfter the block.');
+    const quote = rendered.querySelector('blockquote')!;
+    expect(quote.querySelector('strong')?.textContent).toBe('Clear <rewrite>');
+    expect(quote.textContent).toContain('We want the app to be faster.');
+    expect(quote.querySelectorAll('strong')).toHaveLength(2);
+    expect(rendered.textContent).not.toContain(':::');
+    expect(rendered.textContent).toContain('After the block.');
+    // An unterminated directive is left as text rather than swallowing the rest of the message.
+    expect(renderedMarkdown(':::writing{title="x"}\nno end').textContent).toContain(':::writing');
+  });
+
   it('renders the recorded native URL token as its authored label and opens it through validated IPC', () => {
     const openLink = vi.fn(async () => ({ ok: true, data: true }));
     (dom.window as any).api.openLink = openLink;
@@ -210,8 +222,10 @@ describe('a capture that could not be carried whole', () => {
     // The prose either side of the block is prose, not part of the box.
     const paragraphs = [...rendered.querySelectorAll('p')].map((node) => node.textContent);
     expect(paragraphs).toEqual(['Run the suite before pushing.', 'Then open a pull request.']);
-    expect(rendered.querySelector('button')).toBeNull();
-    expect(rendered.textContent).not.toContain('Copy');
+    expect(rendered.querySelectorAll('button')).toHaveLength(1);
+    expect(rendered.querySelector('.markdown-code .tool-output-header')?.textContent).toContain('Code');
+    expect(rendered.querySelector('.markdown-code .tool-copy')?.textContent).toBe('Copy');
+    expect(rendered.textContent).not.toContain('Edit');
   });
 
   it('shows the whole message as markdown rather than a cut capture ending inside a code box', () => {

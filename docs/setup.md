@@ -10,7 +10,7 @@ Read the [responsible-use notice and provider rules](../README.md#responsible-us
 
 1. **Install and open CoS.** Choose the download for your operating system and CPU.
 2. **Choose what ChatGPT may access.** In **Settings → Workspace**, approve a project folder and review the tool permissions.
-3. **Connect the local tools.** Configure a tunnel in **Settings → Setup**, press **Connect**, then add the **Core** app in ChatGPT's Developer mode.
+3. **Connect the local tools.** Configure a tunnel in **Settings → Setup**, press **Connect**, then add the **Core** app in ChatGPT under **Plugins → Add → Create MCP App**.
 4. **Load the companion extension.** Press **Open extension folder**. In `chrome://extensions`, enable Developer mode, choose **Load unpacked** and select that folder. Pairing is automatic.
 5. **Start a task.** Choose a project and model in CoS, write your request and send it.
 
@@ -25,7 +25,10 @@ Want screen and keyboard control? Enable **Desktop** permissions and connect its
 1. Create a tunnel in [Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels), in the same workspace you use in ChatGPT.
 2. Create a **Restricted** [API key](https://platform.openai.com/settings/organization/api-keys) with **Tunnels: Read** and **Tunnels: Use**.
 3. Enter the tunnel ID and key in CoS and press **Connect**.
-4. In ChatGPT, enable Developer mode under **Settings → Apps → Advanced settings**, then create a custom app of type **Tunnel**. Review and enable its actions.
+4. In ChatGPT, open [Plugins](https://chatgpt.com/plugins), click **Add** at the top right and choose **Create MCP App**. Pick **Tunnel** as the connection, select your tunnel and choose **No authentication**. Older ChatGPT versions instead need Developer mode turned on first (**Settings → Security and login**) and show a **+** button. Review and enable the app's actions.
+5. Name each app exactly as CoS shows it (for example `Chat On Steroids Core`). CoS recognizes its tool calls by that name; a renamed app still works, but its calls are filed under Unattributed activity instead of your chat, which also keeps Goal and Loop from seeing them.
+
+> **No Developer mode switch?** That's expected. Current ChatGPT accounts, including new Plus accounts, create the app from **Plugins → Add → Create MCP App** without it, and file edits and desktop control work as before ([#522](https://github.com/totec448-spec/chat-on-steroids/issues/522)).
 
 Core, Desktop and Plugins are separate connectors. Configure each surface you enable. Release packages include the pinned, checksum-verified `tunnel-client`.
 
