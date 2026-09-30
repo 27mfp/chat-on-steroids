@@ -255,6 +255,19 @@ describe('what leaves this machine', () => {
     expect(JSON.stringify(projected)).not.toMatch(/exec_command|SECRET_ARGUMENT|SECRET_RESULT/);
   });
 
+  it('gives the helper the reply a content-reference pointer stands for, not the pointer (#574)', async () => {
+    const session = await createSession({ title: 'pointer replies', conversationId: 'pointer-replies' });
+    await appendEvent(session.id, { time: 100, source: 'extension', kind: 'user_message', message: { text: 'Hi', chars: 2, truncated: false } });
+    const pointer = '::chatgpt-content-reference{index="0" source_message_id="d2b82e00-509e-4a87-aa93-00bcde251680"}';
+    await appendEvent(session.id, { time: 110, source: 'extension', kind: 'assistant_message', messageId: 'pointer-final', final: true,
+      message: { text: pointer, chars: pointer.length, truncated: false },
+      renderedHtml: { text: '<p>Hi! How can I help you today?</p>', chars: 36, truncated: false } });
+    expect(await goal.conversationMessages(session.id)).toEqual([
+      { role: 'user', content: 'Hi' },
+      { role: 'assistant', content: 'Hi! How can I help you today?' }
+    ]);
+  });
+
   it('gives decision helpers authored requests without executor guidance in the reference transcript', async () => {
     const { prependUserPrompt } = await import('../src/shared/user-prompt.js');
     const session = await createSession({ title: 'authored helper context', conversationId: 'authored-helper-context' });
@@ -1279,6 +1292,33 @@ describe('when OpenRouter refuses', () => {
       expect(view.error, String(status)).toContain(expected);
       expect(view.error).not.toContain('sk-or-test');
     }
+  });
+
+  it('keeps a failure the page cannot retry on screen after the page acknowledged it (#584)', async () => {
+    // 402: nothing will change until the user adds credit, so the page does not retry. It shows the
+    // reason and acknowledges the draft. The failure must stay the chat's Goal state: hiding it left
+    // only the still-owed reply, which read as "Answer settling" forever.
+    const sessionId = await seed('c-no-credit');
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: 'Insufficient credits' } }), { status: 402 })) as never;
+    goal.startGoalDraft({ sessionId, conversationId: 'c-no-credit', turnId: 'g-1' });
+    const failed = await settled('c-no-credit');
+    expect(failed.stage).toBe('failed');
+    expect(goal.ackGoalDraft('c-no-credit', failed.token)).toBe(true);
+    expect(goal.goalViewFor('c-no-credit')).toMatchObject({ stage: 'failed', error: expect.stringContaining('out_of_credit'), reply: '' });
+    // Still there once the draft's payload would otherwise expire.
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 11 * 60_000);
+    try {
+      expect(goal.goalViewFor('c-no-credit')).toMatchObject({ stage: 'failed', error: expect.stringContaining('out_of_credit') });
+    } finally { clock.mockRestore(); }
+
+    // A failure the page retries on its own clock is still hidden once acknowledged.
+    const retrySession = await seed('c-busy');
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: 'busy' } }), { status: 503 })) as never;
+    goal.startGoalDraft({ sessionId: retrySession, conversationId: 'c-busy', turnId: 'g-1' });
+    const busy = await settled('c-busy');
+    expect(goal.ackGoalDraft('c-busy', busy.token)).toBe(true);
+    expect(goal.goalViewFor('c-busy')).toBeNull();
   });
 
   it('does not read an arbitrarily large OpenRouter error body just to produce a short status', async () => {

@@ -384,14 +384,30 @@ describe('account-observed worker admission', () => {
   });
 
   // #499: a default saved before 2.1.15 read picker lanes stopped matching, and every spawn failed.
-  it('uses ChatGPT\'s current model when the saved default model is not offered, but keeps explicit requests strict', async () => {
+  // The same stale value is the picker label's hyphenated form of one unique family —
+  // it resolves to that family; explicit requests keep their strict id/alias check.
+  it('resolves a stale default display slug to its unique observed family, but keeps explicit requests strict', async () => {
     const base = defaultConfig();
     await saveConfig({ ...base, multiAgent: { ...base.multiAgent, enabled: true, defaultModel: 'gpt-5.6-sol', defaultReasoning: 'high' } });
     try {
       const result = spawn({ caller: prime, workers: [{ task: 'stale default' }, { task: 'second' }] });
-      expect(result.created.map(worker => [worker.model, worker.reasoningEffort])).toEqual([[null, 'high'], [null, 'high']]);
-      expect(result.defaultNotes).toEqual([expect.stringMatching(/default worker model "gpt-5.6-sol" saved in Settings is not offered/)]);
+      expect(result.created.map(worker => [worker.model, worker.reasoningEffort])).toEqual([['5.6', 'high'], ['5.6', 'high']]);
+      expect(result.defaultNotes ?? []).toEqual([]);
       expect(() => spawn({ caller: prime, workers: [{ task: 'explicit', model: 'gpt-5.6-sol' }] })).toThrow(/not observed/);
+    } finally { await setEnabled(true); }
+  });
+
+  it('uses ChatGPT\'s current model when the saved default is ambiguous, but keeps explicit requests strict', async () => {
+    const base = defaultConfig();
+    await saveConfig({ ...base, multiAgent: { ...base.multiAgent, enabled: true, defaultModel: '5.5', defaultReasoning: 'high' } });
+    vi.mocked(chatModels.getChatModels).mockReturnValue({ state: 'ready', requestedAt: null, observedAt: 1, models: [
+      { id: 'gpt-5-5-thinking', label: '5.5', efforts: ['medium', 'high'] },
+      { id: 'gpt-5-5-pro', label: '5.5', efforts: ['pro'] }
+    ] });
+    try {
+      const result = spawn({ caller: prime, workers: [{ task: 'ambiguous default' }] });
+      expect(result.created.map(worker => [worker.model, worker.reasoningEffort])).toEqual([[null, 'high']]);
+      expect(result.defaultNotes).toEqual([expect.stringMatching(/default worker model "5.5" saved in Settings is not offered/)]);
     } finally { await setEnabled(true); }
   });
 
@@ -3585,6 +3601,25 @@ describe('through the MCP endpoint', () => {
     );
     expect(report?.text).toContain('parser edge case included');
     expect(report?.text).not.toContain('ended without ever confirming');
+  });
+
+  it('does not call a message unread when it arrived after the worker\'s last step and is still queued for it (#551)', async () => {
+    startSwarm(1);
+    bindConversation('worker-1', 'c-worker-1');
+    // Live 2.1.17 trace: the prime queued the next assignment while the worker was finishing the
+    // previous one. The report said the worker "ended without ever confirming" it, and a
+    // millisecond later the app woke the worker to deliver exactly that message.
+    sendMessage(prime, 'worker-1', 'second assignment: run the canary again');
+    await asChat('c-worker-1', 'finish', { result: 'first assignment done' });
+    const report = offerMessagesForConversation(PRIME_CHAT)?.messages.find((message) =>
+      message.text.includes('[worker-1 reported]')
+    );
+    expect(report?.text).toContain('first assignment done');
+    expect(report?.text).not.toContain('ended without ever confirming');
+    expect(report?.text).not.toContain('may not have read');
+    expect(report?.text).toContain('still queued for it');
+    // And it really is: the unread assignment waits for the worker instead of being dropped.
+    expect(swarmStateForCaller(prime).agents.find((agent) => agent.id === 'worker-1')?.pending).toBe(1);
   });
 
   it('tells the prime how much worker capacity the report just freed, and that the worker is reusable', async () => {

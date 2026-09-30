@@ -263,8 +263,15 @@ function load() {
 }
 
 async function loadOnce() {
-  const stored = await chrome.storage.local.get(['port', 'token', 'disconnected', 'deferredRevivals', 'commandAckOutbox', 'inputOpenings', 'desktopInputTabs', 'stopOpenings']);
+  const stored = await chrome.storage.local.get(['port', 'token', 'disconnected', 'deferredRevivals', 'commandAckOutbox', 'inputOpenings', 'desktopInputTabs', 'stopOpenings', 'browserId']);
   port = typeof stored.port === 'number' ? stored.port : null;
+  // Tells this browser apart from another one paired with the same app, so a new chat is opened
+  // and sent in one browser only. Random, local, and never tied to the profile or the user.
+  browserId = typeof stored.browserId === 'string' && /^[a-z0-9]{16,64}$/.test(stored.browserId) ? stored.browserId : '';
+  if (!browserId && typeof globalThis.crypto?.getRandomValues === 'function') {
+    browserId = [...globalThis.crypto.getRandomValues(new Uint8Array(16))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    await chrome.storage.local.set({ browserId });
+  }
   token = typeof stored.token === 'string' ? stored.token : null;
   // Deliberately in `local` rather than `session`: a choice to disconnect that a browser
   // restart undoes is not a choice, it is a delay.
@@ -928,6 +935,9 @@ function retryWanted() {
   // prime sat unopened for good because nothing here thought it had a reason to ask.
   return (
     token !== null ||
+    // An unpaired worker has no other reason to wake up and ask. After a fresh Load unpacked
+    // (new extension id, empty storage) it used to sit idle until someone opened the popup (#568).
+    !disconnected ||
     journal.length > 0 ||
     closeOutbox.length > 0 ||
     commandAckOutbox.length > 0 ||
@@ -987,6 +997,7 @@ async function hello(candidate) {
  * fetch. A checkout that was never packaged has no stamp and sends no header.
  */
 let workerStampValue = '';
+let browserId = '';
 const workerStampReady = (async () => {
   try {
     const stamped = await (await fetch(chrome.runtime.getURL('build-stamp.txt'))).text();
@@ -1007,7 +1018,8 @@ function versionHeaders() {
   return {
     'x-extension-version': version,
     'x-extension-protocol': String(BRIDGE_PROTOCOL),
-    ...(workerStampValue ? { 'x-extension-build': workerStampValue } : {})
+    ...(workerStampValue ? { 'x-extension-build': workerStampValue } : {}),
+    ...(browserId ? { 'x-extension-browser': browserId } : {})
   };
 }
 
@@ -2518,6 +2530,24 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
   return remaining;
 }
 
+/**
+ * Pairs a worker that has no token yet, unless the user disconnected it on purpose.
+ *
+ * Nothing else pairs on its own: `/pair` used to run only from the popup or from a request a
+ * ChatGPT page triggered. A freshly loaded extension (new id, empty storage) therefore stayed
+ * unpaired until someone opened the popup (#568). Once paired, the open ChatGPT pages get their
+ * recorders back, since they had nothing to report to until now.
+ */
+async function ensurePaired() {
+  if (token !== null || disconnected) return false;
+  const result = await provision();
+  if (!result || !result.ok) return false;
+  // Attach the wake channel now rather than on the next 30-second maintenance pass.
+  try { connectWakeSocket(); } catch { /* The next maintenance pass attaches it. */ }
+  await restoreOpenChatgptTabs().catch(() => undefined);
+  return true;
+}
+
 function maintain(woken = false) {
   // Alarm, observation-drain and startup can arrive while tabs.create is awaiting Chrome.
   // Share the whole scan/create pass so one outbox UUID cannot acquire two tabs before ACK.
@@ -2569,7 +2599,10 @@ async function reloadForExtensionUpdate(offer, liveOpenings, liveCommands) {
 async function maintainOnce() {
   // The app decides whether there is recovery work; a worker holding no tabs is not a worker
   // with nothing to do, it is the one that has to open the chat the app is owed.
-  if (token === null) { await activeTabs?.revoke(); return; }
+  if (token === null) {
+    await activeTabs?.revoke();
+    if (!(await ensurePaired().catch(() => false)) || token === null) return;
+  }
   const intent = connectionEpoch;
   let observedTabs = [];
   try { observedTabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS }); } catch { /* Status/recovery still runs; no unobserved tab is pruned. */ }
@@ -2846,15 +2879,23 @@ async function performBrowserRepairs(repairs, policy) {
           continue;
         }
       }
-      if (target && (reason === 'unattributed' || reason === 'blind')) {
+      if (target && (reason === 'unattributed' || reason === 'blind' || reason === 'assistant-error')) {
         // An attribution refresh exists to make a live page report again, not to rescue a
         // broken one, and a reload in the middle of a stream ends that stream: ChatGPT answers
         // it with "Resume stream unavailable" or "could not be loaded", and the turn is lost.
-        // Reported in #393 and measured on 2026-09-26. A page that answers that it is streaming
-        // is alive; stand down and let the incident's next pass decide.
-        const status = await tabReply(target.id, { type: 'clf-page-status' });
-        if (status?.ok === true && status.streaming === true) {
+        // Reported in #393 and measured on 2026-09-26. Interrupted-response recovery has the
+        // same destructive edge once ChatGPT has already recovered: keep a resumed stream queued
+        // for another pass, and retire the episode without navigation only after its exact
+        // transport error has disappeared. A still-visible error keeps the existing reload path.
+        const status = await tabReply(target.id, { type: 'clf-page-status' },
+          documentId ? { documentId } : undefined);
+        if (status?.ok === true && status.streaming === true &&
+            (reason !== 'assistant-error' || status.assistantError === false)) {
           await call(`/status?repairFailed=${encodeURIComponent(token)}&repairAction=${repairAction}`);
+          continue;
+        }
+        if (reason === 'assistant-error' && status?.ok === true && status.assistantError === false) {
+          await call(`/status?repaired=${encodeURIComponent(token)}&repairAction=preserved`);
           continue;
         }
       }
@@ -4218,6 +4259,18 @@ function successorChatBase(offered, source) {
 
 async function placeSuccessorChat(raw, tabId) {
   const id = commandMarkerId(raw && raw.id);
+  const placementError = error => error && typeof error.message === 'string' && error.message
+    ? error.message
+    : String(error);
+  const failPlacement = async reason => {
+    if (!id) return;
+    try {
+      await ackCommand(id, 'failed', reason, null, null, null);
+    } catch {
+      // ackCommand journals before transport. If local persistence itself fails, the command
+      // deadline remains the only truthful fallback; do not mint another opening attempt.
+    }
+  };
   if (id && raw.background === true) {
     const marker = `clf=${encodeURIComponent(id)}`;
     const model = commandModelSlug(raw.model);
@@ -4225,7 +4278,14 @@ async function placeSuccessorChat(raw, tabId) {
     const query = [marker];
     if (model) query.push(`model=${encodeURIComponent(model)}`);
     if (effort) query.push(`reasoning_effort=${encodeURIComponent(effort)}`);
-    const created = await createChatTab(`https://chatgpt.com/?${query.join('&')}#${marker}`, true);
+    let created;
+    try {
+      created = await createChatTab(`https://chatgpt.com/?${query.join('&')}#${marker}`, true);
+    } catch (error) {
+      await failPlacement(`successor_tab_create_failed: ${placementError(error)}`);
+      return;
+    }
+    // The tab exists and loads its marker: its page redeems the command, or the deadline reports it.
     await protectCreatedTab(created, id);
     return;
   }
@@ -4266,11 +4326,17 @@ async function placeSuccessorChat(raw, tabId) {
       const query = [marker];
       if (model) query.push(`model=${encodeURIComponent(model)}`);
       if (reasoningEffort) query.push(`reasoning_effort=${encodeURIComponent(reasoningEffort)}`);
+      let created;
       try {
-        const created = await createChatTab(`${base}?${query.join('&')}#${marker}`, false, raw.active !== false);
+        created = await createChatTab(`${base}?${query.join('&')}#${marker}`, false, raw.active !== false);
+      } catch (error) {
+        await failPlacement(`successor_tab_create_failed: ${placementError(error)}`);
+        return;
+      }
+      try {
         await protectCreatedTab(created, id);
       } catch {
-        // Opening authority was spent. The command deadline reports an unsuccessful attempt.
+        // The tab exists and loads its marker: its page redeems the command, or the deadline reports it.
       }
       return;
     }
@@ -4278,12 +4344,14 @@ async function placeSuccessorChat(raw, tabId) {
   let home = null;
   try {
     home = await chrome.tabs.get(tabId);
-  } catch {
-    // The polling tab closed between its request and this reply. Its operation has spent
-    // opening authority, so the command deadline reports the unsuccessful placement.
+  } catch (error) {
+    await failPlacement(`successor_home_tab_unavailable: ${placementError(error)}`);
     return;
   }
-  if (!home || typeof home.windowId !== 'number') return;
+  if (!home || typeof home.windowId !== 'number') {
+    await failPlacement('successor_home_window_missing');
+    return;
+  }
   // Both a query and a fragment, matching the app's commandUrl(): ChatGPT rewrites its own URL
   // during boot and which of the two survives has changed between builds.
   const base = successorChatBase(raw.project, raw.homeConversationId);
@@ -4297,11 +4365,17 @@ async function placeSuccessorChat(raw, tabId) {
   // Directly after the chat it continues, so a handoff reads as one piece of work instead of a
   // tab appended to the far end of a long strip.
   if (typeof home.index === 'number') create.index = home.index + 1;
+  let created;
   try {
-    const created = await chrome.tabs.create(create);
+    created = await chrome.tabs.create(create);
+  } catch (error) {
+    await failPlacement(`successor_tab_create_failed: ${placementError(error)}`);
+    return;
+  }
+  try {
     await protectCreatedTab(created, id);
   } catch {
-    // Opening authority was spent. The command deadline reports an unsuccessful attempt.
+    // The tab exists and loads its marker: its page redeems the command, or the deadline reports it.
   }
 }
 
@@ -4547,9 +4621,10 @@ async function restoreOpenChatgptTabs() {
 
 chrome.runtime.onInstalled.addListener(() => {
   void restoreOpenChatgptTabs().then(() => recoverDeferredRevivals()).catch(() => undefined);
-  void load().then(() => {
-    scheduleRetry();
-  });
+  void load()
+    .then(() => ensurePaired())
+    .catch(() => undefined)
+    .then(() => scheduleRetry());
 });
 
 if (chrome.runtime.onStartup && typeof chrome.runtime.onStartup.addListener === 'function') {
@@ -4589,6 +4664,7 @@ if (chrome.alarms && chrome.alarms.onAlarm && typeof chrome.alarms.onAlarm.addLi
 // ordinary worker wake-ups are one cheap message per ChatGPT tab and inject nothing; only a
 // dead or stale recorder pays the scripting cost.
 void restoreOpenChatgptTabs().then(() => recoverDeferredRevivals()).catch(() => undefined);
-void load().then(() => {
-  scheduleRetry();
-});
+void load()
+  .then(() => ensurePaired())
+  .catch(() => undefined)
+  .then(() => scheduleRetry());

@@ -561,7 +561,8 @@ it.each(['wizConnect', 'connectionPopoverToggle'])(
 
     expect((doc.getElementById(buttonId) as HTMLButtonElement).disabled).toBe(false);
     (doc.getElementById(buttonId) as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());
+    // The Intel macOS release runner needs more than waitFor's default second for this chain.
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce(), { timeout: 10_000 });
     expect(order).toEqual(['settings', 'key', 'connect']);
   }
 );
@@ -1760,7 +1761,7 @@ it('gives twenty rapid New Chat sends independent visible local chats before any
   const setSessionAutomation = vi.fn();
   const mounted = await mountChat({}, [], { sendInput, setInputAutomation, setSessionAutomation,
     getChatModels: async () => ok({ state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['high'] }] }),
-    listInputs: async () => ok([...rows]), listPausedHelpers: async () => ok([]),
+    listInputs: async () => ok([...rows]), runningTools: async () => ok([]), listPausedHelpers: async () => ok([]),
     listSessions: async () => ok({ sessions: [...summaries], activeId: null, pressure: [] }),
     getSession: async (id: string) => ok({ summary: summaries.find(row => row.id === id), events: [], nextCursor: null })
   });
@@ -1796,7 +1797,7 @@ it('does not steal a newer New Chat draft when an older admission response arriv
   }; }));
   const mounted = await mountChat({}, [], { sendInput,
     getChatModels: async () => ok({ state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['high'] }] }),
-    listInputs: async () => ok([...rows]), listPausedHelpers: async () => ok([]),
+    listInputs: async () => ok([...rows]), runningTools: async () => ok([]), listPausedHelpers: async () => ok([]),
     listSessions: async () => ok({ sessions: [...summaries], activeId: null, pressure: [] }),
     getSession: async (id: string) => ok({ summary: summaries.find(row => row.id === id), events: [], nextCursor: null })
   });
