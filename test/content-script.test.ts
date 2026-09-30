@@ -13095,6 +13095,7 @@ describe('the Compact & resume control', () => {
     live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
       submitted = (editor.textContent || '').trim();
     });
+    userTurn(live.document, 'current-rich-composer-question', 'Continue this work', { sent: false });
 
     await live.hook.startCompact();
 

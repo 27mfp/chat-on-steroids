@@ -114,7 +114,7 @@ it('offers every observed model, including GPT-5.5 and future models, separately
   initChatModels(); applyChatModels({ multiAgent: {}, goal: {} } as Config); await Promise.resolve();
   const slider = dom.window.document.querySelector<HTMLInputElement>('#composerPowerChoices input')!;
   expect(slider.max).toBe('2');
-  expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#composerModel option')].map(option => option.value)).toEqual(['old', 'sol', 'future']);
+  expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#composerModel option')].map(option => option.value)).toEqual(['old', 'old-short', 'sol', 'future']);
   expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#workerModel option')].some(option => option.value === 'old')).toBe(true);
   dom.window.document.querySelector<HTMLButtonElement>('[data-model="future"]')!.click();
   expect(confirmedComposerModel()).toEqual({ model: 'future', reasoningEffort: 'high' });
