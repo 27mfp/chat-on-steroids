@@ -100,7 +100,7 @@ it('opening an empty or pending picker requests models immediately without a sep
   expect(requestChatModels).toHaveBeenCalledTimes(2);
 });
 
-it('offers every observed model, including GPT-5.5 and future models, separately from effort', async () => {
+it('keeps the fork GPT-5.5 exclusion while offering future models and worker choices', async () => {
   dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
   const models = [
@@ -113,8 +113,8 @@ it('offers every observed model, including GPT-5.5 and future models, separately
   const { initChatModels, applyChatModels, confirmedComposerModel } = await import('../src/renderer/chat-models.js');
   initChatModels(); applyChatModels({ multiAgent: {}, goal: {} } as Config); await Promise.resolve();
   const slider = dom.window.document.querySelector<HTMLInputElement>('#composerPowerChoices input')!;
-  expect(slider.max).toBe('2');
-  expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#composerModel option')].map(option => option.value)).toEqual(['old', 'old-short', 'sol', 'future']);
+  expect(slider.max).toBe('1');
+  expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#composerModel option')].map(option => option.value)).toEqual(['sol', 'future']);
   expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#workerModel option')].some(option => option.value === 'old')).toBe(true);
   dom.window.document.querySelector<HTMLButtonElement>('[data-model="future"]')!.click();
   expect(confirmedComposerModel()).toEqual({ model: 'future', reasoningEffort: 'high' });
@@ -312,7 +312,7 @@ it('keeps model provider order and restricts the slider to the selected model’
   const { initChatModels, applyChatModels, confirmedComposerModel } = await import('../src/renderer/chat-models.js');
   initChatModels(); applyChatModels({ multiAgent: {}, goal: {} } as Config); await Promise.resolve();
   const doc = dom.window.document;
-  expect([...doc.querySelectorAll<HTMLElement>('[data-model]')].map(row => row.dataset.model)).toEqual(['astra', 'old', 'sol']);
+  expect([...doc.querySelectorAll<HTMLElement>('[data-model]')].map(row => row.dataset.model)).toEqual(['astra', 'sol']);
   // A single effort (Instant) is not a choice: no slider, the effort is named instead.
   expect(doc.querySelector('#composerPowerChoices input')).toBeNull();
   expect(doc.getElementById('composerPowerModel')!.textContent).toBe('High');

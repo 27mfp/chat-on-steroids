@@ -1676,7 +1676,7 @@ var CLF_DOM = (() => {
 
   function composer() {
     return safe(() => {
-      const classics = [...document.querySelectorAll('#prompt-textarea')].filter(mountedComposer);
+      const classics = [...document.querySelectorAll('#prompt-textarea')].filter(node => !onKeptPage(node));
       const visibleClassic = onlyComposer(classics.filter(shownComposer));
       if (visibleClassic) return visibleClassic;
       if (classics.filter(shownComposer).length > 1) return null;
