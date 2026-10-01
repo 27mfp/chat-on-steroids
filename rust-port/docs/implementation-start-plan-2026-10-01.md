@@ -1,0 +1,37 @@
+# Rust frontend implementation start plan
+
+Date: 2026-10-01
+POC: `rust-port/gpui-prototype` is a synthetic GPUI frontend; no production transport is connected.
+TL;DR: Build the GPUI frontend in stages: prove native input and transcript behavior, connect read-only views to the existing TypeScript owners, add the task interaction slice, then reach full workspace parity. Keep Electron hosting the backend during frontend development.
+
+## Decision
+
+Use `gpui-prototype` as the transcript experiment because its 10,000-row `ListState` does not use `measure_all()` and it already has a prepend operation and GPUI tests. Borrow useful shell ideas from `gpui-feasibility` only after their behavior has been tested; do not maintain two competing implementations of each feature. Rust owns presentation and transient UI state; TypeScript remains the sole owner of sessions, outbox receipts, automation, permissions, credentials and browser work. Add only the named transport operations each frontend stage needs. Do not start a Rust backend rewrite or replace Electron while browser delivery, credentials, and native services still depend on its main process.
+
+## First implementation slice: synthetic transcript behavior
+
+1. Add an append action and deterministic fixture rows in `rust-port/gpui-prototype/src/{main,fixtures}.rs`. Keep existing row IDs immutable. Test tail-follow while at the bottom and reader position while scrolled away, including the negative case where appending must not drag a reader back to the bottom. Exercise actual GPUI state with intra-row offsets and variable heights.
+2. Test prepend across a painted list, not only the logical `ListOffset`. Add delayed row-size changes and code disclosure only after prepend and append tests expose a stable viewport anchor. A changed row above the anchor must not silently move the reader. Record logical-state, painted-window and platform evidence separately.
+3. Check those interactions in a running Linux GPUI window. Record the exact host/display and observed results. A process that stays alive for five seconds is only a startup smoke, not visual proof.
+
+This slice stays inside the prototype and its tests. No production userData, browser bridge, IPC, or extension changes are needed. Run `cargo +stable fmt --check`, `cargo test --locked -j 1`, `cargo check --locked -j 1`, and `cargo build --locked -j 1`; document any failed visual case rather than checking off its acceptance item.
+
+## Next feasibility slice: native composer
+
+Use the pinned GPUI input-handler APIs to implement selection, multiline editing, undo/redo, clipboard, and marked-text/IME handling. Test Enter while composition is active and ordinary Enter/Shift+Enter separately; test focus and selection through view updates and cancellation. Check native IME and cross-row transcript text selection by hand; if virtualized rows cannot support selection, write down the alternative before integrating production history. Do not extend the existing key-event-only draft as the production editor.
+
+## Milestone 0 exit decision
+
+Finish accessibility keyboard/screen-reader checks (stable row IDs, focus, roles and reading order), Linux Wayland and X11 behavior, representative Windows/macOS build and input checks, and same-hardware Electron/GPUI workload measurements. Record memory, idle CPU/wakes, scroll responsiveness, input latency, and startup results with the environment and numerical budgets derived from the comparison. If a platform or native-input requirement fails, choose a component or revise scope explicitly. The actionable tracker is `alternative/gpui-port-checklist.md`; a checked logical-state test must not imply painted or platform acceptance. Record every deferred M0 requirement and its owner before proceeding.
+
+## First production integration, only after that decision
+
+Milestone 1 exposes only named read-only operations needed for session/project lists, paged canonical history, connection status and the worker read view. Use a bounded, versioned private transport from GPUI to the existing Electron-hosted TypeScript process, with a backend-incarnation handshake, fixed allowlist and explicit stale-selection fencing. Reuse current owners through narrow adapters; extract shared IPC logic only when needed. Test matching Rust/TypeScript fixtures, A → B → A selection races, origin versus revision cursors, missing update recovery, malformed/oversized frames and reconnect. On disconnect, show unavailable controls and clear their live authority; M1 exposes no mutations. Keep Electron as a comparison frontend, but elect only one interactive writer for the same userData.
+
+## Frontend completion sequence
+
+- **M2, task interaction:** Implement project/unfiled New Chat drafts with navigation persistence and replacement generations. Add observed model/effort selection, attachment staging and previews, then send through the TypeScript outbox with its existing IDs and receipts. Add queued edit/reorder/cancel, immediate versus after-turn/finish presentation, Stop, End turn and Block as separate owner-backed operations. Follow with Goal/Loop, generated workflows, finish, recovery and Compact & Resume views. For each action, test admission versus confirmed delivery and uncertain outcomes, claimed-entry immutability, stale imports/planner results, late receipts, canonical history reconciliation and session continuity across A → B. Run the real signed-in browser flow before claiming send parity.
+- **M3, workspace parity:** Port the remaining rows in `gpui-frontend-port-plan.md`'s complete coverage table: setup and connection, settings/profiles/roots, sidebar and localization, appearance, rich transcript and review, files/Git/editor/PDF, workspace docks/terminal, plugins/OAuth, skills, usage, diagnostics, updates, pets and the separate overlay, plus native menus and dialogs as far as the Electron host supports them. For every source operation and subscription in both preload inventories, record the native view/action, TypeScript owner, success/refusal/uncertain/disconnect state, async generation fence, fixture, keyboard/accessibility/locale check and platform evidence. Inventory presentation preferences by owner, key, lifetime, default, corruption and migration rule; never migrate outbox, permission or history authority into UI storage. Adapt existing Electron UI scenarios to native checks without counting Electron passes as GPUI evidence. At M3 exit there are no unmapped behaviors or silently deferred screens; any scope reduction needs explicit user approval.
+- **M4, separate host migration:** Only after M3 parity, replace Electron services with narrow platform adapters around the same TypeScript business owners. Plan credential migration, native module ABI, platform permission identity, packaging and updater separately. Removing Electron or rewriting backend owners is not part of the frontend implementation phase.
+
+Record each slice in the actionable checklist and a dated worklog with commands and observed results; keep source tests, native visual/IME/accessibility, build, package, installed and signed-in browser evidence distinct. Review the scope of each production adapter before editing it. The documentation/prototype baseline is maintained on `feat/gpui-frontend-port`; prior checks imply neither current platform acceptance nor a release. Follow [the execution guide](execution-guide.md) and tasks R00–R08 in [the task cards](task-cards.md) for bounded assignments.
