@@ -794,7 +794,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, controller.view())
             elif path.path == '/api/preflight':
                 self.send(200, controller.preflight())
-            elif path.path == '/api/log':
+            elif path.path in ('/api/agent-output', '/api/log'):
                 identity = urllib.parse.parse_qs(path.query).get('id', [''])[0]
                 state = controller.view()
                 entries = state['workers'] + ([state['lead']] if state['lead'] else [])

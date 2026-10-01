@@ -107,3 +107,15 @@ main retained its pre-existing `.gitignore` modification and untracked Rust-port
 sources. The follow-up removes the obsolete manual patch-export path and checks
 that Start renews exhausted execution allowances without terminal intervention.
 No PR merge or product release was performed.
+
+## Dashboard log retrieval correction
+
+The live Chrome dashboard displayed `Failed to fetch` for `/api/log` while
+the authenticated endpoint succeeded outside Chrome. Changed the browser request
+to `/api/agent-output`, retaining the old route for compatibility. Chrome then
+displayed the actual dispatcher log. This is consistent with a browser request
+filter; the specific extension responsible was not established. Restarting the
+controller interrupted lead turn 1 and its newly dispatched R00 worker; retained
+logs and cancellation evidence remain available for automatic follow-up.
+Validation: offline controller suite, Node syntax check and documentation verifier
+pass; no native GPUI acceptance is claimed.

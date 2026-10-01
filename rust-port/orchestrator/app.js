@@ -37,7 +37,7 @@ async function details(id) {
   const agent = [...cachedState.workers, ...(cachedState.lead ? [cachedState.lead] : [])].find(a => a.id === id);
   $('detail-title').textContent = agent ? (agent.title || 'Dispatcher') : 'Activity';
   try {
-    const log = await api(`/api/log?id=${encodeURIComponent(id)}`);
+    const log = await api(`/api/agent-output?id=${encodeURIComponent(id)}`);
     $('details').textContent = [agent?.task ? `ASSIGNMENT\n${agent.task}` : '',
       agent?.report ? `REPORT\n${agent.report}` : '',
       agent?.result?.error ? `ERROR\n${agent.result.error}` : '', `LOG\n${log.text || 'Starting…'}`].filter(Boolean).join('\n\n');
