@@ -1,7 +1,8 @@
 # Rust/GPUI port execution guide
 
 Baseline: fork `main` at `66d59a7` (app 2.1.24), reviewed 2026-10-01.
-Branch: `feat/gpui-frontend-port`. All implementation tasks below are **planned**.
+Branch: `feat/gpui-frontend-port`; implementation PR: [#4](https://github.com/27mfp/chat-on-steroids/pull/4).
+All implementation tasks below are **planned** until actual new evidence is recorded.
 Historical prototype worklogs retain their original results; they are not new acceptance.
 
 ## Read this first
@@ -194,3 +195,26 @@ with the master release plan. Do not infer arm64 runtime from an x64 build or a 
 The next milestone stays closed until the current gate is met or a specific user-approved
 scope exception is recorded. M4 credential/installer work uses isolated test data first;
 production adoption and release require their own authorization and installed evidence.
+
+## AdaL dispatch and publication
+
+Use the [control room](../orchestrator/README.md) for autonomous execution. The user
+only starts/stops and checks status. GPT-6 Sol has read/search and orchestration
+tools only: it dispatches detailed assignments and reviews actual diffs/evidence;
+it does not implement, run shell checks, edit docs or fix workers' code. GLM workers
+do all implementation, independent verification, research, docs and worklogs.
+
+Every assignment includes Context, Steps, Acceptance, Negative cases, Documentation
+and Handoff, plus exact paths and checks/cwd. Every task changes its unique report
+and dated worklog; implementation/verification also update this guide's relevant
+cards/ledger/checklist evidence. A missing documentation update fails the task.
+Independent verification runs from the integrated implementation's base. Defects
+return to an implementation worker, followed by a new verification task.
+
+The controller automatically delivers worker completion to the same lead session,
+then commits/pushes reviewed verified progress only to `feat/gpui-frontend-port`
+in PR #4 after documentation and source/remote epoch checks. There is no manual
+patch/review/commit/push step for the user, no force push, no merge, and no product
+release authorization implied by this development workflow. Keep M0–M4 gates and
+actual evidence requirements intact. Failed calls retain logs and do not replay
+silently; finish independent work before reporting an external gate blocked.

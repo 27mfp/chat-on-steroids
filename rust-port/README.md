@@ -33,3 +33,7 @@ From the repository root, validate docs and inventory drift with:
 ```sh
 python3 rust-port/scripts/verify-docs.py
 ```
+
+- [AdaL control room](orchestrator/README.md): full-screen dark dashboard, a
+  dispatch-only GPT-6 Sol lead, GLM implementation/verification workers, required
+  per-task docs/worklogs, automatic publication to PR #4, and live AdaL usage.
