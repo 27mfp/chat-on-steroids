@@ -161,7 +161,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('Out-of-scope', self.controller.state['workers'][0]['result']['error'])
         self.assertEqual(self.controller.state['inbox'][0]['kind'], 'worker')
 
-    def test_review_gate_integration_export_and_shared_source_untouched(self):
+    def test_review_gate_integration_and_shared_source_untouched(self):
         self.start()
         worker = self.worker()
         self.controller.control('pause')
@@ -174,7 +174,7 @@ class ControllerTests(unittest.TestCase):
         self.controller.integrate(worker['id'])
         self.assertEqual((Path(self.controller.state['run']['workspace']) / 'rust-port/a.txt').read_text(), 'worker changed\n')
         self.assertEqual((self.source / 'rust-port/a.txt').read_text(), 'original\n')
-        self.assertIn(b'worker changed', self.controller.export())
+        self.assertIn('worker changed', module.git(Path(self.controller.state['run']['workspace']), 'diff', self.controller.state['run']['baseline']))
         self.assertTrue(self.controller.integrate(worker['id'])['already_integrated'])
 
     def test_conflicting_patch_refused_without_partial_mutation(self):
@@ -379,6 +379,19 @@ class ControllerTests(unittest.TestCase):
             module.HERE / 'prompts/lead.md', 'test', self.root / 'lead-tools.log', lead=True)
         self.assertEqual(result['answer'], 'Read,Search')
         self.controller.state['run'] = None
+
+    def test_start_renews_exhausted_turn_and_worker_allowances(self):
+        self.start()
+        self.controller.control('pause')
+        self.controller.release_lead.set()
+        wait_for(lambda: not self.controller.jobs)
+        run = self.controller.state['run']
+        run['turns'] = run['turn_limit']
+        run['worker_limit'] = 0
+        self.controller.control('resume')
+        self.assertEqual(run['turn_limit'], 60)
+        self.assertEqual(run['worker_limit'], 60)
+        wait_for(lambda: not self.controller.jobs)
 
     def test_real_process_protocol_and_timeout(self):
         fake = self.root / 'fake-adal'

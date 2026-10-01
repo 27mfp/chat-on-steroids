@@ -111,9 +111,9 @@ after execution; it does not constrain every filesystem/network shell side effec
 The dispatcher's lack of Edit/Bash is an actual runtime tool restriction. Strong
 worker isolation would need an additional container or OS policy.
 
-Default limits: two workers concurrently, 60 total workers per run, 30 lead turns
+Default limits: two workers concurrently, 60 workers per Start allowance, 30 lead turns
 per Start allowance, 30-minute timeout per process, 8 MiB output/patch per process.
-Start explicitly renews the turn allowance when its previous tranche is exhausted.
+Start explicitly renews exhausted turn/worker allowances; no terminal action is needed.
 These limits are not a monetary budget. Launch overrides:
 
 ```sh

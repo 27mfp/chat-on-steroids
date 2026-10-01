@@ -67,10 +67,11 @@ or BYOAK key is selected/configured; inference uses AdaL credits.
   dispatcher on turn two, and Sol reviewed/integrated/finished with automatic local
   fixture publication. No real port task or smoke GitHub push was started. The lead
   performed no edit/shell calls.
-- `python -m unittest discover -s rust-port/orchestrator/tests -v`: **21 passing**.
+- `python -m unittest discover -s rust-port/orchestrator/tests -v`: **22 passing**.
   Includes completion races/session continuity, pause/stop/cancel/restart, slot/file
   reservations, detailed brief/doc requirements, dispatcher tool restrictions,
-  independent verification, actual local Git publication to the PR-named branch,
+  independent verification, actual local Git publication to the PR-named branch, Start renewal of exhausted
+  turn/worker allowances,
   failed-push idempotence, external-source refusal, conflict refusal, review/finish
   gates, source isolation, process completion/timeout, single-controller ownership,
   path validation and HTTP token/Host/Origin boundaries.
@@ -96,3 +97,13 @@ may show unavailable after an incompatible update. Controller/model/provider suc
 is not GPUI paint, input/IME, accessibility, cross-platform, installed or release
 acceptance. Existing port cards and platform gates remain open until actual work
 and evidence satisfy them. This setup does not mark R00–R35 implemented.
+
+## Publication evidence
+
+Setup commit `2b5da38` was pushed with
+`git push fork HEAD:refs/heads/feat/gpui-frontend-port`. Both `git ls-remote fork`
+and GitHub PR #4's head confirmed that commit. The branch worktree was clean;
+main retained its pre-existing `.gitignore` modification and untracked Rust-port
+sources. The follow-up removes the obsolete manual patch-export path and checks
+that Start renews exhausted execution allowances without terminal intervention.
+No PR merge or product release was performed.

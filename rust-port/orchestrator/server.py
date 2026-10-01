@@ -242,7 +242,7 @@ class Controller:
                    'lead_model': LEAD_MODEL, 'worker_model': WORKER_MODEL, 'turns': 0,
                    'summary': '', 'source_files': count, 'branch': BRANCH, 'pr_url': PR_URL,
                    'source_head': source_head, 'remote_head': remote_head,
-                   'published_snapshot': baseline, 'pending_push': False, 'turn_limit': self.max_turns}
+                   'published_snapshot': baseline, 'pending_push': False, 'turn_limit': self.max_turns, 'worker_limit': 60}
             self.state = {'run': run, 'workers': [], 'events': [], 'inbox': [
                 {'kind': 'objective', 'text': objective}], 'lead': None}
             self.event(f'Created isolated snapshot ({count} files); shared checkout unchanged')
@@ -291,8 +291,8 @@ class Controller:
             run = self.state['run']
             if not run or run['status'] != 'running':
                 raise ValueError('Run is not running')
-            if len(self.state['workers']) >= 60:
-                raise ValueError('Run worker limit reached (60); review the scope before starting another run')
+            if len(self.state['workers']) >= run.get('worker_limit', 60):
+                raise ValueError('Worker allowance reached; end the turn and let Start explicitly renew it')
             if sum(w['id'] in self.jobs for w in self.state['workers']) >= 2:
                 raise ValueError('Two workers are already running')
             if not isinstance(allowed_files, list) or len(allowed_files) > 50 or not all(
@@ -676,6 +676,9 @@ class Controller:
                 if run['turns'] >= run.get('turn_limit', self.max_turns):
                     run['turn_limit'] = run['turns'] + self.max_turns
                     self.event('Start renewed the lead turn allowance')
+                if len(self.state['workers']) >= run.get('worker_limit', 60):
+                    run['worker_limit'] = len(self.state['workers']) + 60
+                    self.event('Start renewed the worker allowance')
                 self.preflight()
                 run['status'] = 'running'
                 if not self.state['inbox']:
@@ -724,22 +727,6 @@ class Controller:
             self.save()
         self.schedule()
         return self.view()
-
-    def export(self):
-        with self.lock:
-            run = self.state['run']
-            if not run:
-                raise ValueError('No run')
-            if self.jobs or self.processes:
-                raise ValueError('Wait for jobs to finish (or stop them) before exporting')
-            workspace = run['workspace']
-            # Includes committed integration and lead modifications; never custom tools.
-            patch = subprocess.check_output(['git', '-C', workspace, 'diff', '--binary', run['baseline'], '--', 'rust-port',
-                                             ':(exclude)rust-port/orchestrator'])
-            untracked = git(workspace, 'ls-files', '--others', '--exclude-standard', '--', 'rust-port')
-            if untracked:
-                raise ValueError('Untracked lead files remain. Ask the lead to review and commit them in the isolated tree before exporting.')
-            return patch
 
     def shutdown(self):
         with self.lock:
@@ -819,8 +806,6 @@ class Handler(BaseHTTPRequestHandler):
                     stream.seek(max(0, file.stat().st_size - 64000))
                     log = stream.read(64000).decode('utf-8', 'replace')
                 self.send(200, {'text': log})
-            elif path.path == '/api/export':
-                self.send(200, controller.export(), 'text/plain; charset=utf-8')
             else:
                 self.send(404, {'error': 'Not found'})
         except (ValueError, OSError, subprocess.SubprocessError) as error:
