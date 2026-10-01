@@ -19,6 +19,13 @@ cpSync(source, stage, { recursive: true });
 writeFileSync(path.join(stage, 'background.js'), background
   .replace(ports, 'const PORTS = [8769];')
   .replace(appMarker, "body.app === 'chat-on-steroids-fork'"));
+// The automatic Core mention must elect this fork's connector, even when the
+// official connector is also installed in the account.
+for (const file of ['usage.js', 'content.js', 'fiber.js']) {
+  const filename = path.join(stage, file);
+  writeFileSync(filename, readFileSync(filename, 'utf8')
+    .replaceAll('Chat On Steroids Core', 'Chat On Steroids Fork Core'));
+}
 const manifestPath = path.join(stage, 'manifest.json');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 manifest.name = 'Chat On Steroids Fork companion';

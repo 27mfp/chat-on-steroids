@@ -471,7 +471,7 @@ export type SessionEvent =
    */
   | (BaseEvent & { kind: 'turn_start'; detail?: string })
   | (BaseEvent & { kind: 'turn_end'; outcome: TurnOutcome; detail?: string; reason?: 'thinking_failed'; providerMessageId?: string })
-  | (BaseEvent & { kind: 'chat_error'; message: StoredText; recoverable?: boolean; blocking?: boolean; reason?: 'thinking_failed' })
+  | (BaseEvent & { kind: 'chat_error'; message: StoredText; recoverable?: boolean; blocking?: boolean; reason?: 'thinking_failed' | 'stream_gone' })
   | (BaseEvent & { kind: 'tool_call'; call: ToolCallRecord; origin?: number })
   /**
    * An app-authored line. `continuation` names the Compact & Resume it is about, so the
@@ -516,9 +516,10 @@ export type SessionEventKind = SessionEvent['kind'];
  */
 export const CONTINUATION_MARKER = /^\s*\[\[CLF-(HANDOFF|RESUME):([A-Za-z0-9_-]{16,64})\]\](?:\s|$)/;
 
-/** Page readback may escape ASCII punctuation. Letters and digits cannot be escaped.
+/** Page readback may escape ASCII punctuation. Letters and digits cannot be escaped. A message
+ * that mentions an app is stored as Markdown, so the marker's line ends in a hard break (`\`).
  * Keep this grammar in sync with markedAs() in the unbundled extension/content.js. */
-const CONTINUATION_MARKER_ESCAPED = /^\s*(?:\\?\[){2}CLF\\?-(HANDOFF|RESUME)\\?:((?:[A-Za-z0-9]|\\?[_-]){16,64})(?:\\?\]){2}(?:\s|$)/;
+const CONTINUATION_MARKER_ESCAPED = /^\s*(?:\\?\[){2}CLF\\?-(HANDOFF|RESUME)\\?:((?:[A-Za-z0-9]|\\?[_-]){16,64})(?:\\?\]){2}\\?(?:\s|$)/;
 
 /**
  * Undo one layer of ASCII-punctuation escaping in page readback only. Callers try exact
@@ -526,8 +527,9 @@ const CONTINUATION_MARKER_ESCAPED = /^\s*(?:\\?\[){2}CLF\\?-(HANDOFF|RESUME)\\?:
  */
 export function unescapeMarkdown(value: string): string {
   // A backslash before a line break is the composer's Markdown hard break (see asTyped in
-  // shared/user-prompt.ts); ASCII punctuation is the other escape the page applies.
-  return value.replace(/\\\r?\n/g, '\n').replace(/\\([!-/:-@[-`{-~])/g, '$1');
+  // shared/user-prompt.ts); ASCII punctuation is the other escape the page applies, and an
+  // indented line's first space comes back as `&#x20;` (#821).
+  return value.replace(/\\\r?\n/g, '\n').replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/(^|\n)&#x20;/g, '$1 ');
 }
 
 /** The continuation marker at the head of `text`, as typed or as the composer escaped it. */

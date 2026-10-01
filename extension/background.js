@@ -1812,7 +1812,7 @@ async function reconcileBackgroundWindow(policy) {
   return inBackgroundWindow(async () => {
     let window = await storedBackgroundWindow();
     const tabs = await chrome.tabs.query({});
-    const owned = tabs.filter(tab => Number.isInteger(tab.id) && Number.isInteger(tab.windowId) && owns(tab));
+    const owned = tabs.filter(tab => Number.isInteger(tab.id) && Number.isInteger(tab.windowId) && !tab.pinned && owns(tab));
     if (!window) {
       // Only adopt a window made entirely of app-owned tabs. A personal window
       // containing one managed conversation is not authority over its other tabs.
@@ -1831,7 +1831,7 @@ async function reconcileBackgroundWindow(policy) {
       // async boundary so navigation cannot move an unrelated replacement tab.
       try {
         const current = await chrome.tabs.get(tab.id);
-        if (!owns(current) || current.windowId === window.id) continue;
+        if (current.pinned || !owns(current) || current.windowId === window.id) continue;
         await chrome.tabs.move(current.id, { windowId: window.id, index: -1 });
       } catch { /* A closing/navigating tab is reconsidered by the next ordinary status pass. */ }
     }
@@ -2266,6 +2266,13 @@ function catalogTabNonce(tab) {
     return url.origin === 'https://chatgpt.com' && url.pathname === '/' && /^[a-f0-9-]{36}$/i.test(nonce || '') ? nonce : null;
   } catch { return null; }
 }
+
+/** A command-owned opening is authored work, never an idle model-catalog surface. */
+function catalogCandidateTab(tab) {
+  const custody = discardProtectedTabs[String(tab?.id)];
+  return !(custody && custody !== true && commandMarkerId(custody.commandId));
+}
+
 function inspectRequestedModels(request) {
   if (modelCatalogFlight) return modelCatalogFlight;
   const intent = connectionEpoch;
@@ -2281,7 +2288,11 @@ function inspectRequestedModels(request) {
   };
   let targetNonce = null;
   modelCatalogFlight = (async () => {
-    const observed = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+    // A worker/resume tab gets command custody before it has a provider conversation. A passive
+    // catalog refresh can arrive in the same maintenance pass that created that tab; borrowing
+    // its still-loading composer races the bootstrap that owns it. Keep command-owned openings
+    // out of discovery until their command custody is released.
+    const observed = (await chrome.tabs.query({ url: CHATGPT_TAB_URLS })).filter(catalogCandidateTab);
     const owner = (await chrome.storage.session.get('modelCatalogOwner')).modelCatalogOwner;
     if (wanted && !current()) return;
     if (wanted && owner?.nonce === wanted.nonce && owner.opening) { await waiting('opening'); return; }
@@ -2841,7 +2852,11 @@ async function performBrowserRepairs(repairs, policy) {
         const draftOnly = reason === 'compaction';
         const check = inspectTurn ? await tabReply(target.id,
           { type: 'clf-repair-check', conversationId, draftOnly }, documentId ? { documentId } : undefined) : null;
-        if (check?.safe === false) continue;
+        if (check?.safe === false) {
+          // The repair stays handed for the next pass; the app logs once why the page held it.
+          await call(`/status?repairHeld=${encodeURIComponent(token)}&why=${encodeURIComponent(check.why || 'unknown')}`);
+          continue;
+        }
         const claim = await call('/repairs/claim', { method: 'POST', body: JSON.stringify({ token }) });
         if (!claim.ok || claim.data?.allowed !== true) continue;
         if (target && !suspended) {
@@ -4176,7 +4191,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo, tab) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 21;
+const PAGE_RECORDER_VERSION = 22;
 
 let deferredRecoveryWork = null;
 

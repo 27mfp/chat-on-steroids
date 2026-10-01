@@ -2,10 +2,18 @@ name: Verify published release
 
 # What users download, checked right after it is published: every file matches SHA256SUMS.txt and
 # the standalone extension is the tagged build. A problem opens an issue instead of waiting for a
-# user report. It can also be run by hand for any existing tag.
+# user report. publish.yml calls it right after publishing: a release created with the workflow's
+# own token triggers no other workflow, so `release: published` alone never ran for our releases.
+# It can also be run by hand for any existing tag.
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to verify
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -27,8 +35,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm

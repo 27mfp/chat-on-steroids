@@ -9,6 +9,72 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.24] — Projects and workers back on track
+
+This update fixes Compact & resume for chats inside Projects, workers that started without any Chat On Steroids tools on some ChatGPT accounts, and the automatic refresh of the Plugins connector.
+
+### Fixed
+
+- **Compact & resume works again in Projects.** For chats inside a ChatGPT Project, every Compact & resume failed with "ChatGPT could not open the source Project". ChatGPT changed how it opens a Project: the link at the top of the chat, the message box and the pages a tab keeps in the background all behave differently now. Long Project chats then stopped at their context limit until you stepped in. CoS handles the new behavior, and the replacement chat starts in the same Project.
+- **Workers and Loop get their tools on every account.** On some accounts (seen on Plus and Business in ChatGPT's Chat mode), ChatGPT only gives a chat the Chat On Steroids tools when the message mentions the app. Workers then received their task but couldn't run anything. Every message CoS sends now ends with an "@Chat On Steroids Core" mention, the same one you can pick from ChatGPT's @ menu. On accounts that didn't need it, you'll just see the small mention chip.
+- **The Plugins connector refreshes again.** With larger plugins installed, such as Unity, the automatic refresh of the Plugins connector failed every time, so ChatGPT kept an old tool list after an update. It now works for every plugin set CoS can publish.
+- **No leftover text after a failed worker start.** When ChatGPT didn't accept the start or wake message of a worker, the text stayed in that chat's message box and looked like something you still had to send. CoS now removes its own text; anything you typed stays.
+- **Pinned tabs stay where you put them.** CoS no longer moves a ChatGPT tab you pinned into its background window.
+
+### Improved
+
+- **Clearer Loop pause message.** When Loop pauses because the last answer called no tool, the message now says that ChatGPT may simply be asking you something, instead of only blaming the connection.
+
+### Thank you
+
+To **@lavalava45** for the pinned-tab fix, to **@sumit171204** for the clearer Loop message (a first contribution!), and to **@xeretuye** (#861), **@tude91979059-byte** (#882) and **@tngcphng** for the reports and screenshots that found these problems.
+
+**Updating from 2.1.18 or older?** If the extension doesn't connect, click its icon once; from 2.1.19 on it connects by itself.
+
+## [2.1.23] — Fewer stuck chats
+
+This update is about chats that got stuck and waited for no reason. Stop always works now, auto-compaction no longer waits needlessly, and CoS tells you when it can't recover a chat on its own.
+
+### Fixed
+
+- **Stop always gets you out.** Sometimes CoS kept showing the Stop button after ChatGPT had already finished, and your next message waited forever. Pressing Stop did nothing. Now Stop ends that answer, and your next message goes out.
+- **Auto-compaction starts right away.** If a chat reached its limit just as an answer was finishing, the app waited up to six minutes before compacting. Now it compacts as soon as the answer is done.
+- **Compact & resume works after you close the tab.** If you started Compact & resume and closed the chat's tab, the request quietly expired after ten minutes. It now reopens the chat and finishes the handoff.
+- **New worker chats start reliably.** The app's model check could borrow a worker chat's tab while it was still starting up, and both then competed for its message box. Starting workers are now left alone.
+- **Interrupted answers are recovered more reliably.** When ChatGPT can't resume an interrupted answer, CoS now notices immediately and recovers the chat instead of waiting for an error that never appears.
+
+### New
+
+- **WSL project folders on Windows.** You can approve project folders inside your local WSL distributions (`\\wsl.localhost\…`) and work in them like any other folder.
+- **A notice when recovery needs you.** If CoS has tried everything to recover a stuck chat, it now tells you with a notification instead of only writing it to the log.
+
+### Improved
+
+- **The desktop tools leave CoS alone on Windows too.** The model can no longer see or target the CoS window itself, so it can't change CoS's own settings. This was already the case on macOS.
+- Updated dependencies.
+
+### Thank you
+
+To **@AcureroAdrian** for WSL folder support, the recovery notice and the improved recovery of interrupted answers, and to **@lavalava45** for finding and fixing the worker start-up race. And to **@sumit171204** and **@tngcphng** for reporting stuck chats, with screenshots and logs.
+
+**Updating from 2.1.18 or older?** If the extension doesn't connect, click its icon once; from 2.1.19 on it connects by itself.
+
+## [2.1.22] — Long Loop sessions keep going
+
+A small update for everyone who lets CoS work for a long time. Chats in Loop and with auto-compaction no longer get stuck where 2.1.21 could hang until you stepped in.
+
+### Fixed
+
+- **The next message is not held up anymore.** Some ChatGPT versions return a long, indented message with its spaces spelled `&#x20;`. The app then did not recognize its own message: the internal context showed up in the chat, and the next message waited until you reloaded the page. The app now reads these messages correctly, and a message whose delivery ChatGPT does not confirm within two minutes no longer blocks the chat. It is marked as "may already have been sent" and is never sent twice.
+- **Auto-compaction also works during long-running commands.** While ChatGPT kept checking a long command, such as a test run, automatic Compact & resume gave up with "ChatGPT has not confirmed receiving the latest tool results" and the chat filled up to the limit. It now waits for the pause between two checks and compacts there.
+- **Easier to see why a stuck chat is not recovered.** When the ChatGPT page is not ready for a recovery reload, the app log now says what is holding it, for example a message still waiting for confirmation or text left in the message box.
+
+### Thank you
+
+To **@Haz4rdovisk** for tracking the stuck message down to the byte and fixing it, and to **@mahadansar** for the detailed reports and logs from long Loop sessions.
+
+**Updating from 2.1.18 or older?** If the extension doesn't connect, click its icon once; from 2.1.19 on it connects by itself.
+
 ## [2.1.21] — Korean, a calmer chat and a much more reliable Goal, Loop and Compact & resume
 
 The biggest update in a while. CoS now speaks Korean, the message box has been redesigned, and the chat finally shows what ChatGPT is doing while it works. Under the hood, more than 20 fixes make Goal, Loop and Compact & resume far more dependable, especially with long answers, long thinking and more than one browser.

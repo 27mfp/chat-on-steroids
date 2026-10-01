@@ -521,6 +521,21 @@ metadata retains the Fiber path. Fetch reattachment at DOM readiness captures ea
 wrapper separately and deduplicates responses to avoid recursion through page instrumentation.
 The native `f/conversation/resume` stream uses the same complete-event reader. Observer version 2
 has an explicit refresh/disposal handle, also reached by existing MAIN-helper restoration.
+The same fetch wrapper observes exact same-origin POST `f/conversation/resume` HTTP 404s.
+Only `conversation_id` leaves a string JSON request body (bounded to 16 KiB); unsupported or
+id-less bodies abstain. Before fetch yields, synchronous `cos-resume-request` carries a unique
+id and conversation to content, which freezes the current open generation, native question,
+navigation epoch and request order. `cos-resume-response` retires that custody with the HTTP
+status (null for rejected/unknown/duplicate responses) and optional `streamOpened:true` only
+for 200 `text/event-stream` headers. Content retains at most 16 requests;
+readiness/restoration never replays them. A 404 earns `chat_error` with `reason:stream_gone`
+and `recoverable:true` only while that exact generation/question/epoch still owns it and
+has no native final or Stop. Idle-load 404s, late/foreign requests and ordinary polling abstain.
+The fact neither closes the turn nor renews activity. A newer resume's SSE-open headers,
+terminal evidence or navigation retires its page projection; local tool work behind a broken
+stream does not. Older 404s cannot resurrect failure after a newer successful resume.
+Recorder protocol 22 installs the matching isolated handler; MAIN observer replacement keeps
+its existing nonstreaming disposal gate. Tests: `usage-observer`, `content-script`, `bridge`.
 Replacing a versioned instance cancels its readers and retires listeners; a provider's wrapper
 can still delegate through an inactive instance. A legacy boolean has no disposal handle and
 requires a fresh document; `__cosUsageObserverNeedsReload` records that fact without an extra reload grant.
@@ -606,6 +621,16 @@ remote model receipt.
 
 **Intent:** a model can read or edit only paths approved for the relevant filesystem tool.
 Native and virtual spellings must reach the same decision.
+
+On Windows, folder approval also accepts existing local WSL folders beneath a distribution
+through `\\wsl.localhost\<distro>\...` or `\\wsl$\<distro>\...` when that alias works on the host.
+Other UNC hosts remain rejected by the picker/drop approval flow. Entire drives and entire
+WSL distributions cannot be approved. Native UNC tool paths must first match an already
+approved canonical root before filesystem lookup; virtual paths use the same containment and
+link checks. WSL server/distribution aliases are case-insensitive, but Linux components retain
+exact case through containment, virtual suffixes and project identity. Unsupported Linux links
+fail closed rather than becoming missing-file write targets. This does not select a Linux shell:
+Windows command execution keeps its existing shell and the user may explicitly invoke WSL.
 
 `sandbox.ts` owns root selection, virtual/native normalization, reserved names, traversal and
 invalid host-path rejection, symlink/junction/reparse checks, canonical existing targets and
@@ -1046,7 +1071,12 @@ time alone cannot take this path. The same outbox expiry rule applies during nor
 Desktop delivery captures the native user-message identity inside the same Send acceptance
 operation that proves its text and route. It must not discard that receipt and rediscover the
 row after an await: React may already have replaced it. Navigation still revokes the operation;
-composer clear or a Stop button alone cannot supply a desktop delivery receipt.
+composer clear or a Stop button alone cannot supply a desktop delivery receipt. After the click,
+the wait for that receipt is bounded (`DESKTOP_RECEIPT_MS`) and never clicks again. When it ends
+unproven, the page reports the fixed reason `Native Send receipt was not confirmed.` and frees its
+input slot. `failBrowserInput` then retires the authorized row as the same uncertain send the
+outbox expiry produces (cancelled, never resent, a late exact receipt still confirms it), openings
+and Continue included, so later messages in that chat are claimable without a reload (#821).
 
 Confirmed terminal input receipts stop owning history retries after their exact local session
 directory is positively absent under an available history root. The outbox durably retires them
@@ -2173,10 +2203,16 @@ late attribution or lost owner authority denies that claim. A reload receipt pro
 not that attribution recovered. Other repair reasons retain their own delivery policy.
 Silence, missing-tab, stalled-tab and queued/Goal repairs also use that exact pre-action claim. Unclaimed
 offers retain one token; a claimed action is not reissued merely because its ACK is absent.
+When an unclaimed repair exhausts its offers the chat is marked page-less, the session gets its timeline note
+and the user gets one notification through the stuck-chat notifier, once per episode; a page that asks for
+its chat again lifts the verdict.
 A responsive page flushes native progress and Stop before the main claim, then rechecks its
 captured work/question/document after the claim. An explicit veto or navigation prevents the
 browser action. An unresponsive page supplies no new proof; the original main-process grant
 still requires independent validation. These checks use existing RPC and repair owners.
+A veto names its reason (`why`: page-changed, stop-requested, tool-running, sending, page-busy,
+compaction, draft, changed). The extension reports it with `/status?repairHeld=<token>&why=`, which
+hands nothing out and changes no repair; the app logs each token and reason once (#820).
 The maintenance projection must retain each repair's reason. Compaction uses the same two
 document checks in draft-only mode: its exact ticket can recover its busy source, but an unsent
 text/attachment draft or a new user question vetoes the reload. Suspended shells are checked
@@ -2199,6 +2235,15 @@ markers do not repeat the same notice, and commitment is logged only after actua
 Neither these notices nor page-helper observations grant a browser action.
 Recoverable notice equality ignores a trailing native Retry button label while retaining the
 original recorded error text. Canonical-question ownership still separates genuinely new work.
+`stream_gone` and a recoverable DOM notice for the same canonical question coalesce without
+comparing provider wording; the first recorded notice retains its text/reason. The bridge
+rechecks H2's exact currently open recorded turn and absence of a final before granting the
+existing `assistant-error` episode, whose key is the authored question, independent of text.
+`clf-page-status.assistantError` includes that document's current machine failure even without
+a rendered error card; the existing rule stays that a live stream defers the reload only
+once that error is gone. An exact no-action failure receipt releases the
+reserved reload budget; preservation after recovery spends none. Existing cooldown, claim,
+Stop/draft/tool, completion and after-turn gates continue to own action; no new timer exists.
 The renderer keeps acknowledged Reloaded/Reopened receipts visible after tools resume, colors
 those notices with the existing accent, and explains the one-error-reload budget and subsequent
 silence wait. Trying/failed receipts do not prove a reload; only actual completion is resolved.
@@ -2295,7 +2340,11 @@ awaiting-summary -> awaiting-chat -> claimed -> committing -> committed
    tail. Before automatic Stop, require a fresh native source-turn scan and receipt of its
    issued connector calls; local completion alone can precede delivery to ChatGPT. Missing
    scans or vanished calls cannot acknowledge an observed pending result. The bounded wait
-   leaves an unsent automatic ticket durable when receipt remains unknown. Recheck the exact
+   (six minutes, longer than one five-minute empty `write_stdin` poll plus the model's pause, so
+   a turn that keeps polling long commands is stopped in the gap between two calls; #825)
+   leaves an unsent automatic ticket durable when receipt remains unknown. A turn that ChatGPT
+   ends by itself (no Stop button on two polls, no local call running) counts as received: there
+   is nothing to stop, and a retry would skip the wait anyway. Recheck the exact
    source question, route and document across every await, then retain the local-tool drain.
    Mixed visible/pre-row calls retain their outstanding request evidence, and automatic Stop
    also waits for local execution to drain before the final native scan. Native Code Mode
@@ -2353,7 +2402,8 @@ to renew the ordinary clock, and a healthy long Pro generation used to be swept 
 long". Captured/claimed phases and an unobserved selection keep the ordinary ten minutes.
 
 An explicit desktop compaction immediately uses the existing exact-tab recovery path, which can
-open a missing source while Chrome is already running. It may replace an unclaimed ordinary
+open a missing source while Chrome is already running. It also passes a user's earlier close of that tab: the
+close pauses only automatic repairs, and pressing Compact & resume is the return. It may replace an unclaimed ordinary
 repair, but cannot create a second browser action while another repair is already claimed.
 Every compaction reload rechecks its original continuation token and phase at handout and the
 browser action claim. Cancellation, replacement, source dispatch and completed capture revoke
@@ -2379,7 +2429,10 @@ An unnamed destination never reports a successful resume ACK, even after a trans
 Keep its armed dispatch and journal gate for exact marker reconciliation; a missing id plus
 generic timeout text is not proof of non-delivery and cannot authorize another Send.
 Continuation readback accepts one layer of Markdown escaping on ASCII punctuation, never
-escapes on letters/digits. Main/store/renderer and the unbundled content script must agree on
+escapes on letters/digits. The same fallback turns a line-opening `&#x20;` back into a space:
+the page writes an indented line's first space that way (#821). An `&#x20;` inside a line
+stays literal. The `COS_CONTEXT` frame readers (`shared/user-prompt.ts`, `chatgpt-dom.js`)
+follow the same order: exact first, then this one layer. Main/store/renderer and the unbundled content script must agree on
 the marker and preserve its exact removable span. Match an escaped marker separately from
 the brief before considering a fully escaped rendering, preserving literal path/glob backslashes.
 Bootstrap receipt fallback remains restricted to app-owned opening messages and retains native
