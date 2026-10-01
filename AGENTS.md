@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-28**, including upstream 2.1.18 and selected fork integrations. App/extension **2.1.18**,
+Source alignment: **2026-09-30**, including upstream main at 2.1.21 and selected fork integrations. App/extension **2.1.21**,
 bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
 
@@ -2358,13 +2358,13 @@ repair, but cannot create a second browser action while another repair is alread
 Every compaction reload rechecks its original continuation token and phase at handout and the
 browser action claim. Cancellation, replacement, source dispatch and completed capture revoke
 obsolete pickup authority. Recovery text distinguishes an unsent request from an outstanding
-answer; neither implies a completed brief exists. An explicit desktop compaction's reload says it sends the
-request; nothing failed. Every reload row's id names the chat it reloaded
+answer; neither implies a completed brief exists. An explicit desktop compaction's reload says
+it sends the request; nothing failed. Every reload row's id names the chat it reloaded
 (`browser-repair:<chat>:<id>`) and the page paints it only in that chat. B's page may record its
 sent resume message after B's first attributed call already committed; that message is the
 feed's resume boundary, where A's rows stop. A reloaded source waits for its visible,
-editable composer and recorded original question before freezing the source identity or stopping
-the turn. Already observed identities and a real user Send remain cancellation boundaries during
+editable composer and the recorded original question and user-message identity before freezing
+the source identity or stopping the turn. Already observed identities and a real user Send remain cancellation boundaries during
 hydration; an empty loading DOM must not be treated as a different conversation. The source
 rechecks the composer before insertion. If ChatGPT remounts that editor just after insertion,
 the source waits for the same exact marked draft in the current editable composer before its

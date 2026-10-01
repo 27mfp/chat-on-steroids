@@ -1659,9 +1659,10 @@ var CLF_DOM = (() => {
       )];
       const visibleShell = onlyComposer(shell.filter(shownComposer));
       if (visibleShell) return visibleShell;
-      // September 2026 business composer: #prompt-textarea is gone. The live field is
-      // one visible contenteditable labelled "Ask ChatGPT", or #pending-conversation-input
-      // while that rich editor is hidden.
+      // The editor can remount before its surrounding form regains its composer marker, so
+      // the upstream data-composer-markdown identity above is also eligible while unique.
+      // Newer business composers can instead be labelled "Ask ChatGPT", with
+      // #pending-conversation-input present while that rich editor is hidden.
       const ask = onlyComposer([...document.querySelectorAll('[contenteditable="true"]')].filter(node =>
         shownComposer(node) && labelledAsk(node)));
       if (ask) return ask;

@@ -12044,7 +12044,7 @@
         'Attachment upload was not confirmed. Check the unsent draft and any file error in ChatGPT before trying again.'
       ));
       await Promise.resolve();
-      if (!onTarget() || !draftCurrent() || sendText(CLF_DOM.composer()?.textContent) !== sendText(input.text)) return fail(t(
+      if (!onTarget() || !draftCurrent() || sendText(composerDraft()) !== sendText(input.text)) return fail(t(
         'content_delivery_draft_preserved',
         'The composer changed; your draft was preserved'
       ));
@@ -12084,7 +12084,7 @@
         // may replace it before this async operation resumes; do not rediscover it.
         receipt = { conversation, user: { id: user.id } };
         return true;
-      }, matchesSubmittedBootstrap);
+      }, matchesInputUser);
       // #744: one retry when the editor was replaced before anything asked to send it.
       if (!(await nativeSend()) &&
           !(!authorizing && !sendAttempted && !receipt && !draft.current() && draftCurrent() && await nativeSend())) return false;
