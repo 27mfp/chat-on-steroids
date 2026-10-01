@@ -45,11 +45,11 @@ app.whenReady().then(async () => {
   await check('Renderer selected the fixture session', `document.getElementById('contextMeterCompact').textContent==='38%'`);
   await capture('composer');
   await click('#modelMenu > summary');
-  await check('Every account model is offered', `document.querySelectorAll('#composerModelChoices .model-choice').length===5`);
-  await click('[data-model="gpt-5.5"]');
-  await check('Model click preserves open menu and exact identity', `document.getElementById('modelMenu').open&&document.getElementById('composerModel').value==='gpt-5.5'`);
+  await check('Fork model exclusion preserves the remaining account choices', `document.querySelectorAll('#composerModelChoices .model-choice').length===4`);
+  await click('[data-model="gpt-5.6-sol"]');
+  await check('Model click preserves open menu and exact identity', `document.getElementById('modelMenu').open&&document.getElementById('composerModel').value==='gpt-5.6-sol'`);
   await js(`{const input=document.querySelector('#composerPowerChoices input');input.value='0';input.dispatchEvent(new Event('input',{bubbles:true}));}`);
-  await check('Effort changes only the selected model', `document.getElementById('composerModel').value==='gpt-5.5'&&document.getElementById('composerReasoning').value==='low'`);
+  await check('Effort changes only the selected model', `document.getElementById('composerModel').value==='gpt-5.6-sol'&&document.getElementById('composerReasoning').value==='low'`);
   await capture('model'); await click('#chatInput');
   await click('#composerSettings > summary'); await capture('modes');
   await click('[data-mode="goal"]'); await pause(350);
@@ -75,7 +75,7 @@ app.whenReady().then(async () => {
   await type('Review the layout.'); await click('.composer-selected-skill-remove');
   await check('Removing a skill preserves the draft', `document.getElementById('chatInput').value==='Review the layout.'`);
   await click('#chatSend'); await pause(350);
-  await check('Send retains selected model and effort', `(async()=>{const result=await window.api.listInputs();return result.data.some(entry=>entry.text==='Review the layout.'&&entry.model==='gpt-5.5'&&entry.reasoningEffort==='low')})()`);
+  await check('Send retains selected model and effort', `(async()=>{const result=await window.api.listInputs();return result.data.some(entry=>entry.text==='Review the layout.'&&entry.model==='gpt-5.6-sol'&&entry.reasoningEffort==='low')})()`);
   await js(`composerFixture.scenario('empty')`); await pause(400);
   await click('#createPlan');
   await check('Plan toggles native send behavior', `document.getElementById('createPlan').getAttribute('aria-pressed')==='true'&&document.getElementById('chatSend').getAttribute('aria-label')==='Generate plan'`);

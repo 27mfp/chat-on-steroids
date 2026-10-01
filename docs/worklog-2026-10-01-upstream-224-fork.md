@@ -19,3 +19,9 @@
 - The default Wayland UI runner stalled; an initial X11 attempt inherited explicit Wayland environment overrides and failed platform initialization. Repeated with both Ozone overrides set to X11.
 - A bounded 20-second X11 fork startup smoke stayed running until timeout (124), using temporary userData. It emitted Sharp/Mesa warnings; this establishes startup only, not signed-in ChatGPT acceptance.
 - Prepared-extension readback confirms version 2.1.24, all three fork Core readers and byte-identical prepared/source DOM adapter. The production fork browser extension still needs reload through normal browser extension management before its new code is active in an already-open document. No signed-in provider flow is claimed.
+
+## Final verification and remote
+
+- The complete final `content-script` suite passed all 803 tests. Final DOM/model/usage checks passed 200 tests. Model expectations and the hidden-editor regression are green after their integration corrections.
+- X11 UI checks completed: 33/37 passed on the broad run. The composer check still expected GPT-5.5; updated it to select GPT-5.6 Sol while verifying the fork exclusion, then its full flow passed separately (22 seconds). Thus 34 distinct checks passed; reactions, pet performance (`hidePet`/`releaseFocus` missing) and workspace-terminal fit remained failing. These are observed validation gaps, not established live regressions or proven pre-existing failures.
+- Refreshed local build/extension from final production source and confirmed source/prepared DOM bytes match. Fork main was pushed without force; local HEAD and remote main were verified equal. No upstream push, public release or GPUI/prototype publication was performed.
