@@ -77,6 +77,19 @@ var CLF_DOM = (() => {
     for (const chip of clone.querySelectorAll(APP_MENTION_CHIP)) chip.remove();
     return text(clone);
   };
+  /**
+   * The composer's raw text without app mention chips (#900). A send receipt is compared with the
+   * message ChatGPT renders, which readers take without its chip; capturing the chip made the two
+   * differ and the first question of a mentioned send never opened its turn.
+   */
+  const composerAuthoredText = () => {
+    const box = composer();
+    if (plainComposer(box)) return String(box.value || '');
+    if (!box?.querySelector?.(APP_MENTION_CHIP) || typeof box.cloneNode !== 'function') return box?.textContent ?? '';
+    const clone = box.cloneNode(true);
+    for (const chip of clone.querySelectorAll(APP_MENTION_CHIP)) chip.remove();
+    return clone.textContent ?? '';
+  };
 
   function searchUnitRole(node) {
     const key = node?.getAttribute?.('data-chatgpt-search-unit-key') ||
@@ -348,14 +361,33 @@ var CLF_DOM = (() => {
    */
   function retryFailure(button) {
     return safe(() => {
+      // Exclude navigation/composer controls before rendered-text reads on each recorder tick.
+      // An exact English Retry keeps its earlier reach: its card was never tied to one region.
+      const quick = (button.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!/^retry$/i.test(quick) && button.closest('nav, aside, header, form, [role="navigation"], [role="menu"]')) return null;
       const label = (button.innerText || button.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!/^retry$/i.test(label) || !displayed(button)) return null;
+      // A transport card can keep its English message while localizing its button; this was
+      // observed with "Reintentar". The label cannot be the anchor. Another language's
+      // button counts only as the single labelled control that ends a notice whose
+      // remaining text is, whole, a known transport failure; the wording check still decides.
+      const english = /^retry$/i.test(label);
+      if (!label || !displayed(button)) return null;
+      if (!english && button.closest(`${OWN_SURFACES}, .markdown, [data-message-author-role], [hidden], [inert]`)) return null;
       let node = button.parentElement;
       for (let up = 0; node && up < 8 && node !== document.body; up++, node = node.parentElement) {
         if (node.closest && node.closest(OWN_SURFACES)) return null;
-        const value = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        const content = node.textContent || '';
+        if (content.length >= 500) return null;
+        const value = (node.innerText || content).replace(/\s+/g, ' ').trim();
         if (value.length >= 500) return null;
-        if (displayed(node) && transportFailure(value)) return { text: value, node };
+        if (!displayed(node)) continue;
+        if (english) {
+          if (transportFailure(value)) return { text: value, node };
+          continue;
+        }
+        if (!value.endsWith(label) || [...node.querySelectorAll('button')].filter(displayed).length !== 1) continue;
+        const notice = value.slice(0, -label.length).trim();
+        if (notice && transportFailure(notice)) return { text: notice, node };
       }
       return null;
     }, null);
@@ -576,6 +608,9 @@ var CLF_DOM = (() => {
       let previous = null;
       for (const node of document.querySelectorAll(TURN)) {
         if (node.closest?.(`${OWN_SURFACES},.markdown,[data-markdown-text-style],[data-content-search-unit-key],[contenteditable]`)) continue;
+        // An earlier page kept undisplayed in this tab (the source chat after a Project resume)
+        // holds another conversation's turns; they are not this page's.
+        if (onKeptPage(node)) continue;
         if (node.matches?.(SEARCH_TURN) && (node.closest?.(LEGACY_TURN) || node.closest?.(SHELL_TURN))) continue;
         const id = turnIdOf(node);
         if (node.matches?.(SHELL_TURN)) {
@@ -720,7 +755,7 @@ var CLF_DOM = (() => {
   /** A pre-Send draft lease lasts only for this operation and these exact DOM nodes. */
   function captureComposerDraft(value, stillCurrent = () => true) {
     let box = composer(), host = composerBox() || composerActions()?.host;
-    let rebound = false;
+    let rebound = false, withdrawRebound = false;
     // Native rich-text normalization moves line breaks into paragraph structure.
     // Keep the same text comparison used by send receipts; editor identity and
     // trusted edits still revoke the lease even when a user only changes spacing.
@@ -775,6 +810,27 @@ var CLF_DOM = (() => {
         for (const name of events) host?.addEventListener(name, changed, true);
         return same();
       },
+      /**
+       * Withdraw text this lease inserted after its send authority was revoked. Unlike clear(),
+       * this does not require the old operation predicate to remain current: losing that authority
+       * is exactly why recovery must stop. It still requires exact untouched app-owned text, no
+       * attachments, and follows at most one React composer remount before deleting anything.
+       */
+      withdraw() {
+        if (touched || files.length || hasComposerAttachments()) return false;
+        let current = composer();
+        if (!current?.isConnected || compact(current.textContent) !== insertedText) return false;
+        if (current !== box) {
+          if (withdrawRebound) return false;
+          const nextHost = composerBox() || composerActions()?.host;
+          for (const name of events) host?.removeEventListener(name, changed, true);
+          box = current; host = nextHost; withdrawRebound = true;
+          for (const name of events) host?.addEventListener(name, changed, true);
+        }
+        current = composer();
+        if (touched || current !== box || !box?.isConnected || compact(box.textContent) !== insertedText || hasComposerAttachments()) return false;
+        return clearPromptExact(value);
+      },
       dispose() { for (const name of events) host?.removeEventListener(name, changed, true); }
     };
   }
@@ -802,7 +858,8 @@ var CLF_DOM = (() => {
       // Historical interrupted exchanges can retain in_progress forever. Only the
       // latest native response can describe this composer's current generation.
       const latest = [...document.querySelectorAll(SHELL_TURN)].filter(node =>
-        !node.closest(`${OWN_SURFACES},.markdown,[data-markdown-text-style],[data-content-search-unit-key],[contenteditable]`)).at(-1);
+        !node.closest(`${OWN_SURFACES},.markdown,[data-markdown-text-style],[data-content-search-unit-key],[contenteditable]`) &&
+        !onKeptPage(node)).at(-1);
       if (latest?.getAttribute('data-clf-shell-running') !== location.pathname) return false;
       /*
        * The stamp alone is not enough, and the comment above understates why: `in_progress` is
@@ -2343,14 +2400,21 @@ var CLF_DOM = (() => {
     }
   }
 
-  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null, receiptTimeoutMs = null, mention = null, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null } = {}) {
-    const refused = reason => { try { onNoSend?.(reason); } catch {} return false; };
+  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null, receiptTimeoutMs = null, mention = null, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null, explain = null } = {}) {
+    // Why a Send ended without acceptance, as one short code for the caller's diagnostics (#820).
+    // It names the first refusal only and never changes what Send does. onNoSend keeps the
+    // fork's pre-click callback on the same code.
+    const refused = (why) => {
+      try { explain?.(why); } catch { /* Diagnostics never change Send. */ }
+      try { onNoSend?.(why); } catch { /* Diagnostics never change Send. */ }
+      return false;
+    };
     try {
       let box = composer();
-      if (!box || !box.isConnected) return refused('composer_unavailable');
-      if (!stillCurrent()) return refused('send_lifetime_changed');
-      if (generating() || stopButton()) return refused('generation_active');
-      if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return refused('composer_disabled');
+      if (!box || !box.isConnected) return refused('editor-missing');
+      if (!stillCurrent()) return refused('chat-changed');
+      if (generating() || stopButton()) return refused('page-busy');
+      if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return refused('editor-disabled');
       // Rich editors use adjacent paragraphs for newlines; textContent concatenates
       // their words. Preserve those boundaries when matching the rendered user message.
       const readDraft = node => plainComposer(node) ? String(node.value || '').trim()
@@ -2358,8 +2422,10 @@ var CLF_DOM = (() => {
         .map((node) => (node.textContent || '') + (/^(P|DIV|BR)$/.test(node.nodeName) ? '\n' : '')).join('')).trim();
       const draftText = () => readDraft(box);
       let submitted = draftText();
-      if (!submitted) return refused('draft_empty');
+      if (!submitted) return refused('draft-empty');
       const squeeze = value => String(value || '').replace(/\s+/g, '');
+      // ChatGPT can remount the classic editor after insertion. A caller that still owns
+      // the same draft may follow that node; every other send keeps the original editor.
       const electCurrentEditor = () => {
         if (composer() === box && box.isConnected) return true;
         const replacement = composer();
@@ -2429,8 +2495,9 @@ var CLF_DOM = (() => {
         let mentionPlain = '';
         let priorMentions = new Set();
         const ownMentions = () => mentionAdded ? [...box.querySelectorAll(`[app-mention-path="${mention.path}"]`)].filter(node => !priorMentions.has(node)) : [];
-        const finish = (value, reason = 'send_not_accepted') => {
+        const finish = (value, why = attempted ? 'not-accepted' : 'send-not-ready') => {
           if (done) return;
+          if (!value) refused(why);
           done = true;
           // A Send that was not accepted leaves the prompt as it was approved, without our token.
           // The editor may have drawn its own token in place of the one we inserted.
@@ -2447,7 +2514,6 @@ var CLF_DOM = (() => {
           // to and resend the entire bootstrap. Preserve replaced editors/new drafts.
           if (clearAcceptedDraft && value && submittedMessageObserved && stillCurrent() && composer() === box)
             clearPromptExact(submitted);
-          if (!value && !attempted) refused(reason);
           resolve(value);
         };
         // ChatGPT's editor reads the inserted token on a later task and draws it again. A click
@@ -2461,7 +2527,7 @@ var CLF_DOM = (() => {
           for (const pending of mentionTimers) clearTimeout(pending);
           mentionTimers = [];
           // Only the prompt as it was approved may be sent, with or without the token.
-          if (promptWithoutMentions(box) !== mentionPlain) return finish(false);
+          if (promptWithoutMentions(box) !== mentionPlain) return finish(false, 'draft-changed');
           mentionedDraft = draftText();
           const resume = resumeClick;
           resumeClick = null;
@@ -2469,7 +2535,7 @@ var CLF_DOM = (() => {
         };
         const check = () => {
           if (done) return;
-          if (!stillCurrent() || (beforeConversation && conversationId() !== beforeConversation)) return finish(false, 'send_lifetime_changed');
+          if (!stillCurrent() || (beforeConversation && conversationId() !== beforeConversation)) return finish(false, 'chat-changed');
           if (attempted) {
             if (accepted()) finish(true);
             return;
@@ -2478,10 +2544,9 @@ var CLF_DOM = (() => {
           // React can enable/mount Send after accepting our editor input. Observe that
           // readiness through this same bounded operation; neither a guessed Enter nor
           // an unrelated Stop/composer-clear is evidence that this draft was submitted.
-          if (conversationId() !== beforeConversation) return finish(false, 'conversation_changed');
-          if (!electCurrentEditor()) return finish(false, 'editor_replaced');
-          if (draftText() !== (mentionedDraft ?? submitted)) return finish(false, 'draft_changed');
-          if (generating()) return finish(false, 'generation_active');
+          if (conversationId() !== beforeConversation) return finish(false, 'chat-changed');
+          if (!electCurrentEditor()) return finish(false, 'draft-changed');
+          if (draftText() !== (mentionedDraft ?? submitted) || generating()) return finish(false, generating() ? 'page-busy' : 'draft-changed');
           if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return;
           let button = sendButton();
           if (!sendButtonEnabled(button)) return;
@@ -2494,20 +2559,20 @@ var CLF_DOM = (() => {
             // must still be the ones it authorized; a late answer cannot revive this send.
             if (!stillCurrent() || conversationId() !== beforeConversation || !electCurrentEditor() ||
                 draftText() !== (mentionedDraft ?? submitted) || generating() || box.getAttribute('aria-disabled') === 'true' ||
-                box.getAttribute('contenteditable') === 'false') return finish(false, 'send_control_changed');
+                box.getAttribute('contenteditable') === 'false') return finish(false, 'send-not-ready');
             const liveButton = sendButton();
             if (liveButton !== control) {
-              if (!resumed && !acceptEditorRemount?.(box)) return finish(false, 'send_control_changed');
+              if (!resumed && !acceptEditorRemount?.(box)) return finish(false, 'send-not-ready');
               button = liveButton;
               control = liveButton;
             }
-            if (!sendButtonEnabled(control)) return finish(false, 'send_control_changed');
+            if (!sendButtonEnabled(control)) return finish(false, 'send-not-ready');
             if (mention && !plainComposer(box) && !mentionTried) {
               mentionTried = true;
               priorMentions = new Set(box.querySelectorAll('[app-mention-path]'));
               mentionPlain = promptWithoutMentions(box);
               const added = addAppMention(box, mention);
-              if (added === false) return finish(false);
+              if (added === false) return finish(false, 'draft-changed');
               if (added) {
                 mentionAdded = true;
                 mentioning = true;
@@ -2544,8 +2609,8 @@ var CLF_DOM = (() => {
           authorizing = true;
           // Claim/dispatch authority belongs at readiness, not before a possibly long
           // disabled-Send wait. This is still one attempt under the existing deadline.
-          try { Promise.resolve(beforeSend(() => !done && stillCurrent())).then(allowed => allowed === true ? click() : finish(false, 'send_authorization_refused'), () => finish(false, 'send_authorization_failed')); }
-          catch { finish(false, 'send_authorization_failed'); }
+          try { Promise.resolve(beforeSend(() => !done && stillCurrent())).then(allowed => allowed === true ? click() : finish(false, 'not-authorized'), () => finish(false, 'not-authorized')); }
+          catch { finish(false, 'not-authorized'); }
         };
 
         observer = new MutationObserver(check);
@@ -2558,11 +2623,11 @@ var CLF_DOM = (() => {
         if (observeEvidence) unsubscribeEvidence = observeEvidence(check);
         // Readiness and acceptance share one deadline below the app's command lease.
         const timeout = Number.isFinite(acceptanceTimeoutMs) ? Math.max(1, Math.min(30000, acceptanceTimeoutMs)) : 30000;
-        timer = setTimeout(() => { if (attempted) check(); if (!attempted || !acceptUserReceipt) finish(false, 'send_readiness_timeout'); }, timeout);
+        timer = setTimeout(() => { if (attempted) check(); if (!attempted || !acceptUserReceipt) finish(false); }, timeout);
         check();
       });
     } catch {
-      return refused('send_exception');
+      return false;
     }
   }
 
@@ -3111,6 +3176,7 @@ var CLF_DOM = (() => {
     AUTHORED_SELECTOR: '[data-message-author-role="assistant"], .markdown, [data-content-search-unit-key], [data-markdown-text-style="assistant-message"]',
     turnIdOf,
     messageIdOf,
+    composerAuthoredText,
     userPromptText,
     userMessageReaction,
     presentUserPrompts,

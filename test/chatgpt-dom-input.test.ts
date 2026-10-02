@@ -16,13 +16,13 @@ interface DomApi {
   temporaryChatReady(): boolean;
   confirmTemporaryChatIntroduction(): void;
   errors(): Array<{ text: string; recoverable: boolean; blocking?: boolean }>;
-  captureComposerDraft(text: string, current?: () => boolean): { current(): boolean; clear(): Promise<boolean>; dispose(): void; attachments(nodes: Element[]): void };
+  captureComposerDraft(text: string, current?: () => boolean): { current(): boolean; clear(): Promise<boolean>; withdraw(): boolean; dispose(): void; attachments(nodes: Element[]): void };
   visibleModelSelection(): { model: string; reasoningEffort?: string } | null;
   hasComposerAttachments(): boolean;
   stopGeneration(current: () => boolean): boolean;
   inspectModelSettings(current?: () => boolean, failure?: (reason: string) => void): Promise<Array<{id: string; label: string; efforts: string[]}> | null>;
   send(options?: { acceptanceTimeoutMs?: number; stillCurrent?: () => boolean; beforeSend?: () => Promise<boolean>;
-    mention?: { path: string; name: string } | null }): Promise<boolean>;
+    mention?: { path: string; name: string } | null; explain?: (why: string) => void }): Promise<boolean>;
   selectModelSettings(model: string | null, effort: string | null, current?: () => boolean): Promise<boolean>;
   uploadImages(images: Array<{ name: string; dataUrl: string }>, current?: () => boolean, draft?: ReturnType<DomApi['captureComposerDraft']>, files?: File[]): Promise<boolean>;
   messages(): Array<{ id: string; role: 'user' | 'assistant'; text: string; turnId: string | null }>;
@@ -198,6 +198,17 @@ describe('a workspace page kept mounted behind the current one', () => {
     button.addEventListener('click', () => { clicked = true; user('Exact app prompt'); box.replaceChildren(); });
     expect(await api.send()).toBe(true);
     expect(clicked).toBe(true);
+  });
+  it("reads only this page's turns, not those of an earlier page kept undisplayed", () => {
+    // After a Project resume the tab keeps the source chat hidden; its turns are another chat's.
+    const kept = keptPage();
+    const old = document.createElement('section');
+    old.setAttribute('data-testid', 'conversation-turn-1'); old.setAttribute('data-turn', 'user'); old.setAttribute('data-turn-id', 'old-turn');
+    const oldMessage = document.createElement('div');
+    oldMessage.setAttribute('data-message-id', 'old-message'); oldMessage.setAttribute('data-message-author-role', 'user');
+    oldMessage.textContent = 'Source chat question'; old.append(oldMessage); kept.append(old);
+    user('Resumed chat question');
+    expect(api.messages().map(message => message.text)).toEqual(['Resumed chat question']);
   });
   it('still refuses two displayed editors', () => {
     keptPage(true);
@@ -703,6 +714,37 @@ describe('Core app mention on app-owned sends (#861)', () => {
   });
 });
 
+describe('why a Send ended without acceptance (#820)', () => {
+  it.each<[string, () => void]>([
+    ['page-busy', () => { const stop = document.createElement('button'); stop.setAttribute('data-testid', 'stop-button'); stop.textContent = 'Stop'; button.closest('div')!.append(stop); }],
+    ['editor-missing', () => { box.remove(); }],
+    ['draft-empty', () => { box.textContent = ''; }],
+    ['chat-changed', () => undefined]
+  ])('names %s at once', async (why, arrange) => {
+    arrange();
+    const said: string[] = [];
+    expect(await api.send({ explain: reason => said.push(reason), stillCurrent: () => why !== 'chat-changed' })).toBe(false);
+    expect(said).toEqual([why]);
+  });
+  it('names a refused authorization and a Send that never became ready', async () => {
+    const refused: string[] = [];
+    expect(await api.send({ explain: reason => refused.push(reason), beforeSend: async () => false })).toBe(false);
+    expect(refused).toEqual(['not-authorized']);
+    button.disabled = true;
+    const late: string[] = [];
+    const result = api.send({ explain: reason => late.push(reason), acceptanceTimeoutMs: 1000 });
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(await result).toBe(false);
+    expect(late).toEqual(['send-not-ready']);
+  });
+  it('says nothing for an accepted Send', async () => {
+    const said: string[] = [];
+    button.addEventListener('click', () => { user('Exact app prompt'); box.replaceChildren(); });
+    expect(await api.send({ explain: reason => said.push(reason) })).toBe(true);
+    expect(said).toEqual([]);
+  });
+});
+
 describe('composer-owned controls and Send readiness', () => {
   it.each(['allowed', 'revoked', 'replaced', 'deadline'])('authorizes only a ready Send and rechecks after authorization (%s)', async state => {
     button.disabled = true;
@@ -954,6 +996,32 @@ describe('native image readiness', () => {
     expect(await draft.clear()).toBe(false);
     expect(removed).not.toHaveBeenCalled(); expect(box.textContent).not.toBe(''); draft.dispose();
   });
+  it('withdraws exact app text across one remount after send authority is revoked', () => {
+    document.execCommand = command => { if (command === 'delete') api.composer()?.replaceChildren(); return true; };
+    let current = true;
+    const draft = api.captureComposerDraft('Exact app prompt', () => current);
+    current = false;
+    const replacement = box.cloneNode(true) as HTMLElement;
+    box.replaceWith(replacement);
+    box = replacement;
+    expect(draft.current()).toBe(false);
+    expect(draft.withdraw()).toBe(true);
+    expect(box.textContent).toBe('');
+    draft.dispose();
+  });
+  it('does not withdraw a changed remounted draft after send authority is revoked', () => {
+    document.execCommand = command => { if (command === 'delete') api.composer()?.replaceChildren(); return true; };
+    let current = true;
+    const draft = api.captureComposerDraft('Exact app prompt', () => current);
+    current = false;
+    const replacement = box.cloneNode(true) as HTMLElement;
+    replacement.textContent = 'User-authored replacement';
+    box.replaceWith(replacement);
+    box = replacement;
+    expect(draft.withdraw()).toBe(false);
+    expect(box.textContent).toBe('User-authored replacement');
+    draft.dispose();
+  });
   it.each(['Remove file:', 'Remove file 1:'])('waits for matching %s attachment and upload completion before Send', async (label) => {
     const input = upload();
     const tile = document.createElement('button'); tile.type = 'button';
@@ -1014,6 +1082,72 @@ describe('native image readiness', () => {
   });
 });
 
+
+describe('transport-card scan cost', () => {
+  it('skips hundreds of sidebar buttons without reading innerText and still finds the real card', () => {
+    const sidebar = document.createElement('nav');
+    const readSidebarText = vi.fn(function (this: HTMLElement) { return this.textContent; });
+    Object.defineProperty(sidebar, 'innerText', { get: readSidebarText });
+    for (let index = 0; index < 300; index++) {
+      const row = document.createElement('div');
+      const control = document.createElement('button');
+      control.textContent = `Chat ${index}`;
+      Object.defineProperty(control, 'innerText', { get: readSidebarText });
+      Object.defineProperty(row, 'innerText', { get: readSidebarText });
+      row.append(control); sidebar.append(row);
+    }
+    document.body.append(sidebar);
+    const card = document.createElement('div');
+    card.innerHTML = '<p>Resume stream unavailable </p><button>Reintentar</button>';
+    document.body.append(card);
+
+    for (let tick = 0; tick < 3; tick++) {
+      expect(api.errors()).toEqual([
+        expect.objectContaining({ text: 'Resume stream unavailable', recoverable: true })
+      ]);
+    }
+    expect(readSidebarText.mock.calls.length).toBe(0);
+  });
+
+  it.each(['nav', 'aside', 'header', 'form', '[role="navigation"]', '[role="menu"]'])(
+    'does not read or classify a retry-like control inside %s', selector => {
+      const host = document.createElement(selector.startsWith('[') ? 'div' : selector);
+      if (selector.startsWith('[')) host.setAttribute('role', selector.includes('navigation') ? 'navigation' : 'menu');
+      host.innerHTML = '<p>Resume stream unavailable </p><button>Reintentar</button>';
+      const readText = vi.fn(function (this: HTMLElement) { return this.textContent; });
+      Object.defineProperty(host, 'innerText', { get: readText });
+      Object.defineProperty(host.querySelector('button')!, 'innerText', { get: readText });
+      document.body.append(host);
+
+      expect(api.errors()).toEqual([]);
+      expect(readText.mock.calls.length).toBe(0);
+    }
+  );
+
+  it('still finds an English Retry card rendered beside the composer', () => {
+    const form = document.createElement('form');
+    form.innerHTML = '<div><p>A network error occurred. </p><button>Retry</button></div><div contenteditable="true"></div>';
+    document.body.append(form);
+
+    expect(api.errors()).toEqual([
+      expect.objectContaining({ text: 'A network error occurred. Retry', recoverable: true })
+    ]);
+  });
+
+  it.each([500, 5000])('rejects a %i-character container before reading its rendered text', length => {
+    const host = document.createElement('div');
+    const control = document.createElement('button');
+    control.textContent = 'Reintentar';
+    host.append('x'.repeat(length - control.textContent.length), control);
+    const readText = vi.fn(() => 'Resume stream unavailable Reintentar');
+    Object.defineProperty(host, 'innerText', { get: readText });
+    document.body.append(host);
+
+    expect(host.textContent).toHaveLength(length);
+    expect(api.errors()).toEqual([]);
+    expect(readText.mock.calls.length).toBe(0);
+  });
+});
 
 describe('provider limit notice', () => {
   it('records and acknowledges the exact Korean access notice once without accepting other dialogs', () => {

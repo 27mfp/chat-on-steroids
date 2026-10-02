@@ -573,7 +573,7 @@
   "Add attachments": "新增附件",
   "Chat mode": "聊天模式",
   "Chat automation": "聊天自動化",
-  "What should this chat achieve?": "此聊天要實現什麼目標？",
+  "Optional. Leave empty to work toward what you asked in this chat.": "選填。留空則以你在此聊天中提出的請求為目標。",
   "Goal behavior": "目標行為",
   "Estimated session context": "對話上下文估算",
   "Reload ChatGPT models": "重新載入 ChatGPT 模型",
@@ -1753,5 +1753,10 @@
   "This chat (estimate)": "此對話（估算）",
   "Context limit": "上下文上限",
   "Filled": "已用",
-  "Compacts automatically at": "自動壓縮起點"
+  "Compacts automatically at": "自動壓縮起點",
+  "A chat stopped": "一個聊天已停止",
+  "Its last turn produced nothing and nothing followed. Send a message there to start a fresh turn.": "它的最後一個回合沒有產生任何內容，之後也沒有後續。在那裡傳送一則訊息即可開始新的回合。",
+  "Its last turn failed and nothing followed. Send a message there to start a fresh turn.": "它的最後一個回合失敗了，之後也沒有後續。在那裡傳送一則訊息即可開始新的回合。",
+  "Recovery stopped": "恢復已停止",
+  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "瀏覽器沒有接手這個聊天的修復，因此應用程式已停止重試。重新開啟它的分頁即可繼續恢復。"
 }

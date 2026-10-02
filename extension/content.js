@@ -891,8 +891,8 @@
     coreMention = path && event.data.name === 'Chat On Steroids Core' ? { path, name: event.data.name } : null;
   });
   function sendSubmittedText(stillCurrent, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null,
-                             matchesUser = matchesSubmittedUser, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null, receiptTimeoutMs = null) {
-    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser, onSendAttempt, onNoSend, acceptEditorRemount, receiptTimeoutMs, mention: coreMention,
+                             matchesUser = matchesSubmittedUser, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null, receiptTimeoutMs = null, explain = null) {
+    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser, onSendAttempt, onNoSend, acceptEditorRemount, receiptTimeoutMs, mention: coreMention, explain,
       observeEvidence: check => { pageViewChecks.add(check); return () => pageViewChecks.delete(check); } });
   }
   const GOAL_MARKER_INSTRUCTION = '\n\nFor this Goal session only: at the end of each final reply, write exactly one separate last line: [[COS_GOAL:COMPLETE]] if the entire requested task is finished, or [[COS_GOAL:CONTINUE]] if requested work remains. Do not claim completion for partial work. If user input is required, explain it and omit both markers.';
@@ -921,7 +921,9 @@
         : (composer?.innerText || composer?.textContent || '');
       if (raw.trim() && !raw.includes(GOAL_MARKER_INSTRUCTION.trim())) CLF_DOM.insertPrompt(raw + GOAL_MARKER_INSTRUCTION, true);
     }
-    const text = sendText(composerDraft());
+    // The receipt is compared with the rendered message, which readers take without an app
+    // mention chip (#861); capture the same authored text, never the chip (#900).
+    const text = sendText(CLF_DOM.composerAuthoredText());
     const attachmentNames = CLF_DOM.composerAttachmentNames();
     if (!text && !attachmentNames.length) return;
     let previousMessageId = null;
@@ -11869,11 +11871,14 @@
 
   // Continue may arrive before the browser journal's final reaches the app. Check the
   // exact latest native answer locally as well, even when the composer already says Send.
-  async function recoveryPageUnfinished(safe) {
-    if (!safe()) return false;
+  async function recoveryPageUnfinished(safe, note = () => undefined) {
+    // `note` names the veto for the caller's release report (#820); it never changes the verdict.
+    const unsafe = () => { note('lease-lost'); return false; };
+    const unreadable = () => { note(safe() ? 'page-unreadable' : 'lease-lost'); return false; };
+    if (!safe()) return unsafe();
     const latest = CLF_DOM.turns().at(-1);
     if (latest?.role === 'assistant') {
-      if (!await refreshFiber({ pageTurnId: latest.id, pageTurn: latest.node || latest.nodes?.[0] }) || !safe()) return false;
+      if (!await refreshFiber({ pageTurnId: latest.id, pageTurn: latest.node || latest.nodes?.[0] }) || !safe()) return unreadable();
       let current = CLF_DOM.turns().at(-1);
       let native = current?.role === 'assistant' ? fiberTurnFor(current) : null;
       // A successful page-model scan can still omit the latest React turn while a
@@ -11881,18 +11886,22 @@
       // fresh exact native evidence before allowing either Stop or Send.
       if (!native) {
         const repair = await repairFiberReader();
-        if (repair?.ok !== true || !safe()) return false;
+        if (repair?.ok !== true || !safe()) return unreadable();
         current = CLF_DOM.turns().at(-1);
         if (current?.role !== 'assistant' ||
-            !await refreshFiber({ pageTurnId: current.id, pageTurn: current.node || current.nodes?.[0] }) || !safe()) return false;
+            !await refreshFiber({ pageTurnId: current.id, pageTurn: current.node || current.nodes?.[0] }) || !safe()) return unreadable();
         current = CLF_DOM.turns().at(-1);
         native = current?.role === 'assistant' ? fiberTurnFor(current) : null;
-        if (!native) return false;
+        if (!native) return unreadable();
       }
       // A known native final vetoes Continue even while delivery to the app is pending.
-      if (native?.endMessageId) { await flush(); return false; }
+      if (native?.endMessageId) { note('page-final'); await flush(); return false; }
     }
-    return Boolean(await flush() && safe());
+    const flushed = await flush();
+    if (flushed && safe()) return true;
+    if (!flushed) note('journal-pending');
+    else note('lease-lost');
+    return false;
   }
 
   async function inspectRepairPage(message) {
@@ -11994,7 +12003,11 @@
     let decision = null;
     let sent = false;
     let draft = null;
+    let withdrawableRecoveryDraft = false;
     let claimedSilence = null;
+    // The first reason this attempt ended before Send, reported with its release (#820).
+    let withdrawReason = null;
+    const noteWithdraw = (why) => { withdrawReason ??= why; };
     const writableComposer = () => CLF_DOM.composerVisible() && CLF_DOM.composerWritable() && CLF_DOM.composer();
     try {
       // Registration may precede React mounting the composer. Observe that same document
@@ -12027,6 +12040,7 @@
       const input = reply?.data?.input;
       if (input?.silenceBoundary || input?.completedTurnId) { claimedSilence = input; sourceQuiet = true; }
       if (!input || !onTarget()) return false;
+      withdrawableRecoveryDraft = Boolean(input.recovery) && !(input.images || []).length && !(input.attachments || []).length;
       const fail = async (error) => { await ask({ type: 'desktop_input', id: input.id, owner: input.owner, fail: true, error }); return false; };
       // ChatGPT restores its shared home draft even in a newly opened input tab.
       // This exact claimed bootstrap owns replacement text; existing chats and
@@ -12130,8 +12144,7 @@
       // lease may follow it once; after authorization a lost editor stays a failure.
       let authorizing = false;
       const draftCurrent = () => draft.current() ||
-        (input.recovery === true && !authorizing && !sendAttempted && !(input.images || []).length &&
-          !(input.attachments || []).length && draft.rebind() && draft.current());
+        (withdrawableRecoveryDraft && !authorizing && !sendAttempted && draft.rebind() && draft.current());
       const files = [];
       for (const attachment of input.attachments || []) {
         const parts = [];
@@ -12182,11 +12195,12 @@
       // the bootstrap reader only broadens text readback after an exact match fails.
       const nativeSend = () => sendSubmittedText(sendingTarget, false, async sendCurrent => {
         // Preserve the outbox's revocable claim until the actual native Send is ready.
-        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current())) return false;
+        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current(), noteWithdraw)) return false;
         authorizing = true;
         const authorized = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, authorize: true });
-        if (!sendCurrent() || authorized?.data?.ok !== true || !onTarget() || !draft.current()) return false;
-        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current())) return false;
+        if (authorized?.data?.ok !== true) noteWithdraw('app-refused');
+        if (!sendCurrent() || authorized?.data?.ok !== true || !onTarget() || !draft.current()) { noteWithdraw('lease-lost'); return false; }
+        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current(), noteWithdraw)) return false;
         sendAttempted = true;
         return true;
       }, (user, conversation) => {
@@ -12197,7 +12211,7 @@
         // may replace it before this async operation resumes; do not rediscover it.
         receipt = { conversation, user: { id: user.id } };
         return true;
-      }, matchesInputUser, null, null, null, DESKTOP_RECEIPT_MS);
+      }, matchesInputUser, null, null, null, DESKTOP_RECEIPT_MS, noteWithdraw);
       // #744: one retry when the editor was replaced before anything asked to send it.
       if (!(await nativeSend()) &&
           !(!authorizing && !sendAttempted && !receipt && !draft.current() && draftCurrent() && await nativeSend())) {
@@ -12256,10 +12270,13 @@
     } finally {
       if (claimedSilence && !sendAttempted) {
         await ask({ type: 'desktop_input', id: claimedSilence.id, owner: claimedSilence.owner, fail: true,
-          error: 'After-turn pickup was withdrawn before Send.' }).catch(() => undefined);
+          error: 'After-turn pickup was withdrawn before Send.', detail: withdrawReason ?? undefined }).catch(() => undefined);
       }
       if (draft) {
-        try { if (!sendAttempted) await draft.clear(); }
+        try {
+          const cleared = !sendAttempted ? await draft.clear() : false;
+          if (!sendAttempted && !cleared && withdrawableRecoveryDraft) draft.withdraw();
+        }
         catch { /* Unprovable cleanup preserves the draft; never keep the input slot busy. */ }
         finally { draft.dispose(); }
       }

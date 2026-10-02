@@ -772,7 +772,8 @@ describe('desktop input delivery and helper ownership', () => {
       desktop_input: async message => {
         if (message.authorize && kind === 'after authorization') await held;
         return { ok: true, data: message.authorize || message.ack || message.fail
-          ? { ok: true } : { input: claimed(kind === 'plain input' ? {} : { recovery: true }) } };
+          ? { ok: true } : { input: claimed(kind === 'plain input' ? {} : { recovery: {
+            questionId: 'source-question', pro: false, busyUntil: Date.now() + 60_000, phase: 'ready' } }) } };
       }
     }, () => undefined, false, true);
     const button = live.document.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!;
@@ -805,6 +806,33 @@ describe('desktop input delivery and helper ownership', () => {
       expect(authorizations).toHaveLength(kind === 'after authorization' ? 1 : 0);
     }
     if (kind === 'other text') expect(composerText(live.document)).toBe('A sentence I was still writing');
+  });
+
+  it('clears its exact remounted recovery draft when Send authorization is withdrawn', async () => {
+    let authorizations = 0;
+    const recovery = { questionId: 'source-question', pro: false, busyUntil: Date.now() + 60_000, phase: 'ready' };
+    const recoveryInput = claimed({ recovery, silenceBoundary: { turnId: 'source-turn' } });
+    live = await harness(`https://chatgpt.com/c/${chatA}`, {
+      desktop_input: message => {
+        if (message.authorize) {
+          authorizations++;
+          const composer = live!.document.querySelector('#prompt-textarea')!;
+          composer.replaceWith(composer.cloneNode(true));
+          return { ok: true, data: { ok: false } };
+        }
+        return { ok: true, data: message.ack || message.fail ? { ok: true } : { input: recoveryInput } };
+      }
+    }, () => undefined, false, true);
+    const sends = watchSend(live.document);
+
+    expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: chatA })).toEqual({ ok: false });
+    await settle();
+
+    expect(authorizations).toBe(1);
+    expect(sends()).toBe(0);
+    expect(live.sent.filter(message => message.fail)).toContainEqual(expect.objectContaining({ error: 'After-turn pickup was withdrawn before Send.' }));
+    expect(composerText(live.document), 'the withdrawn recovery left its own text blocking repair').toBe('');
+    expect(await live.runtimeMessage({ type: 'clf-repair-check', conversationId: chatA })).toMatchObject({ safe: true });
   });
 
   it('keeps a helper claim revocable until its delayed Send is ready', async () => {
@@ -10333,6 +10361,56 @@ describe('how a turn is recorded as having ended', () => {
     });
   });
 
+  /**
+   * Live 2026-09-30, Spanish ChatGPT: the full-width card kept the provider's English message
+   * ("Resume stream unavailable") but its button read "Reintentar". The card was found only
+   * through a button labelled exactly "Retry", so the failure never reached the session and the
+   * chat sat on the card for 33 minutes until the user typed into it.
+   */
+  it.each([
+    ['Reintentar', 'Resume stream unavailable'],
+    ['Erneut versuchen', 'A network error occurred. Please check your connection and try again.']
+  ])('records the non-alert failure card whose button reads %s', async (label, message) => {
+    live = await harness();
+    startGenerating(live.document);
+    assistantTurn(live.document, 'turn-localized-retry-card', []);
+    live.hook.observe();
+    await settle();
+
+    const card = live.document.createElement('div');
+    const copy = live.document.createElement('p');
+    copy.textContent = message;
+    const retry = live.document.createElement('button');
+    retry.textContent = label;
+    card.append(copy, retry);
+    live.document.body.append(card);
+    live.hook.observe();
+    await settle();
+
+    const [failure] = emitted(live.sent, 'chat_error').map((entry) => entry.event);
+    const [started] = emitted(live.sent, 'turn_start').map((entry) => entry.event);
+    expect(failure).toMatchObject({ text: message, recoverable: true, turnId: started.turnId });
+  });
+
+  it('does not take a localized button beside unrelated prose for the failure card', async () => {
+    live = await harness();
+    startGenerating(live.document);
+    assistantTurn(live.document, 'turn-localized-prose', []);
+    live.hook.observe();
+    await settle();
+
+    const explanation = live.document.createElement('div');
+    explanation.textContent = 'Resume stream unavailable was the old message; pulsa solo si quieres repetir. ';
+    const retry = live.document.createElement('button');
+    retry.textContent = 'Reintentar';
+    explanation.append(retry);
+    live.document.body.append(explanation);
+    live.hook.observe();
+    await settle();
+
+    expect(emitted(live.sent, 'chat_error')).toEqual([]);
+  });
+
   it('keeps a generating transport failure open through reload and records the recovered final under its original identity', async () => {
     live = await harness();
     startGenerating(live.document);
@@ -16085,6 +16163,9 @@ describe('the context meter and automatic compaction', () => {
     expect(sends()).toBe(1);
   });
 
+  // Each case waits out the real receipt settle loop: about 20 s on a laptop, and up to 110 s on
+  // the Intel macOS runner that only builds releases, where the global 30 s limit failed the 2.1.25
+  // publish twice with nothing wrong. The wait is the behavior under test, so it gets its own limit.
   it.each(['unanswered', 'missing', 'vanished', 'different-tool', 'different-request', 'duplicate', 'shared-request'])('keeps an automatic ticket unsent when native receipt is %s', async failure => {
     live = await harness(undefined, {
       activity: () => withContext(205_000, settings({ auto: true }), { pendingTools: 0 }),
@@ -16113,7 +16194,7 @@ describe('the context meter and automatic compaction', () => {
     expect(stopped).not.toHaveBeenCalled();
     expect(startedCompactions(live)).toEqual([]);
     expect(live.sent.some(message => message.type === 'compact' && (message.sourceDispatch || message.sourceLost))).toBe(false);
-  });
+  }, 180_000);
 
   it('compacts once the turn ends by itself while a stale row still reads as unanswered', async () => {
     // Live 2026-10-01: the ticket was filed mid-turn, the turn finished on its own, and the
@@ -21057,8 +21138,9 @@ describe('ordinary Continue native recovery', () => {
     expect(claims).toBe(1);
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.authorize)).toHaveLength(0);
     expect(send).not.toHaveBeenCalled();
+    // The release says why (#820): native Send never became ready.
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.fail)).toEqual([
-      expect.objectContaining({ id, owner: 'input-owner', error: 'After-turn pickup was withdrawn before Send.' })
+      expect.objectContaining({ id, owner: 'input-owner', error: 'After-turn pickup was withdrawn before Send.', detail: 'send-not-ready' })
     ]);
 
     sendButton.removeAttribute('aria-disabled');
@@ -21329,4 +21411,32 @@ describe('ordinary Continue native recovery', () => {
     expect(stop).not.toHaveBeenCalled();
     expect(live.sent).toContainEqual(expect.objectContaining({ type: 'desktop_input', silenceBusyTurnId: 'source-turn' }));
   });
+});
+
+// #900: a send receipt captured with the Core mention chip never matched the rendered message
+// (read without its chip), so the first question of a mentioned send never opened its turn.
+it.each([false, true])('opens the first turn of a prompt sent with an app mention chip: %s', async chip => {
+  live = await harness(undefined, {
+    activity: () => ({ ok: true, data: { entries: [], stream: [], pendingTools: 0 } })
+  });
+  const box = live.document.querySelector('#prompt-textarea')!;
+  box.textContent = 'Reply OK';
+  const addChip = (parent: Element) => {
+    const node = live!.document.createElement('span');
+    node.setAttribute('data-prompt-link-href', 'app://asdk_app_fixture');
+    node.setAttribute('app-mention-path', 'app://asdk_app_fixture');
+    node.textContent = 'Chat On Steroids Core';
+    parent.append(node);
+  };
+  if (chip) addChip(box);
+  live.document.querySelector('#composer-form')!.dispatchEvent(new live.window.Event('submit', { bubbles: true }));
+  const user = userTurn(live.document, 'receipt-example', 'Reply OK', { sent: false });
+  if (chip) addChip(user.querySelector('.whitespace-pre-wrap')!);
+  box.replaceChildren();
+  live.hook.observe();
+  await settle();
+  live.hook.observe();
+  await live.hook.flush();
+  expect(emitted(live.sent, 'user_message')).toHaveLength(1);
+  expect(emitted(live.sent, 'turn_start')).toHaveLength(1);
 });

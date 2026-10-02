@@ -377,7 +377,7 @@
   "Add attachments": "Anhänge hinzufügen",
   "Chat mode": "Chat-Modus",
   "Chat automation": "Chat-Automatisierung",
-  "What should this chat achieve?": "Was soll dieser Chat erreichen?",
+  "Optional. Leave empty to work toward what you asked in this chat.": "Optional. Leer lassen, um auf das hinzuarbeiten, worum du in diesem Chat gebeten hast.",
   "Goal behavior": "Verhalten von Goal",
   "Estimated session context": "Geschätzter Sitzungskontext",
   "Reload ChatGPT models": "ChatGPT-Modelle neu laden",
@@ -1753,5 +1753,10 @@
   "This chat (estimate)": "Dieser Chat (geschätzt)",
   "Context limit": "Kontextlimit",
   "Filled": "Belegt",
-  "Compacts automatically at": "Automatisch komprimieren ab"
+  "Compacts automatically at": "Automatisch komprimieren ab",
+  "A chat stopped": "Ein Chat ist stehen geblieben",
+  "Its last turn produced nothing and nothing followed. Send a message there to start a fresh turn.": "Sein letzter Durchlauf hat nichts geliefert, und danach kam nichts mehr. Schreib dort eine Nachricht, um einen neuen Durchlauf zu starten.",
+  "Its last turn failed and nothing followed. Send a message there to start a fresh turn.": "Sein letzter Durchlauf ist fehlgeschlagen, und danach kam nichts mehr. Schreib dort eine Nachricht, um einen neuen Durchlauf zu starten.",
+  "Recovery stopped": "Wiederherstellung beendet",
+  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "Der Browser hat die Reparatur dieses Chats nicht übernommen, deshalb versucht die App es nicht mehr. Öffne seinen Tab wieder, dann geht die Wiederherstellung weiter."
 }
