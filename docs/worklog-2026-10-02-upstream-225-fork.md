@@ -13,4 +13,10 @@
 - DOM input, fork identity, user prompt, resume and extension-path tests passed: 188 tests.
 - `test/content-script.test.ts` passed: 809 tests.
 - `tsc --noEmit` passed.
-- No signed-in ChatGPT flow, package rebuild or desktop reinstall is claimed.
+- No signed-in ChatGPT flow was run.
+
+## Installed apps
+
+- The latest non-prerelease remained `v2.1.25`. Upstream `main` was left ahead of that tag and was not merged.
+- Replaced `~/.local/bin/chat-on-steroids` with the official Linux x64 AppImage. Its SHA-256 is `12d8e149dcb7adcd33ef97ee5fd23607c46d18209a1a5845a2a3d97a578160db`, matching `SHA256SUMS.txt` and the release asset. Extracted package and extension metadata both report 2.1.25. The previous installed file is `/tmp/cos-official-2.1.25/previous-installed.AppImage`. The desktop entry path is unchanged. Real user data was not opened.
+- Fast-forwarded this checkout to the published fork commit, built it, and refreshed `outputs/fork-extension` at 2.1.25 with port 8769 and the fork Core name. `node scripts/install-fork-desktop.mjs` refreshed only the fork desktop entry. Uncommitted local work was stashed for the build and restored afterwards.
