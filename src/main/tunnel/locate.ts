@@ -11,6 +11,7 @@
 import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { app } from 'electron';
 import { pathEntries } from '../env.js';
 
 export type BinaryName = 'tunnel-client' | 'cloudflared';
@@ -159,12 +160,8 @@ export function locateBinary(name: BinaryName, hint?: string): string | null {
 function bundledDir(): string | null {
   const packaged = process.resourcesPath ? path.join(process.resourcesPath, 'tunnel') : null;
   if (packaged && existsSync(packaged)) return packaged;
-  // electron-vite flattens src/main/tunnel into out/main/index.js. Source-based
-  // test runs retain the deeper src/main/tunnel directory.
-  const built = path.resolve(__dirname, '..', '..', 'resources', 'tunnel');
-  if (existsSync(built)) return built;
-  const source = path.resolve(__dirname, '..', '..', '..', 'resources', 'tunnel');
-  return existsSync(source) ? source : null;
+  const dev = path.join(app.getAppPath(), 'resources', 'tunnel');
+  return existsSync(dev) ? dev : null;
 }
 
 /** The bundled tunnel-client version, for the diagnostics panel. */

@@ -602,6 +602,18 @@ var CLF_DOM = (() => {
     if (!turn || node.getAttribute('data-clf-fiber-turn') !== turn || !stamp?.startsWith(`${turn}:`)) return null;
     try { return decodeURIComponent(stamp.slice(turn.length + 1)) || null; } catch { return null; }
   }
+  /**
+   * The exact page-model user id of a shell exchange whose user slot is not rendered.
+   *
+   * MAIN names it with `data-clf-fiber-user` (fiber.js) only when the page model holds exactly
+   * one user message for the exchange. It counts only under the exchange's current turn stamp,
+   * like every other MAIN stamp: a stale or foreign one reads as no user message at all.
+   */
+  function unrenderedUserIdOf(section) {
+    const turn = section?.getAttribute?.('data-clf-fiber-turn'), stamp = section?.getAttribute?.('data-clf-fiber-user');
+    if (!turn || !stamp?.startsWith(`${turn}:`)) return null;
+    try { return decodeURIComponent(stamp.slice(turn.length + 1)) || null; } catch { return null; }
+  }
   function turns() {
     return safe(() => {
       const out = [];
@@ -615,9 +627,16 @@ var CLF_DOM = (() => {
         const id = turnIdOf(node);
         if (node.matches?.(SHELL_TURN)) {
           const users = [...node.querySelectorAll('[data-content-search-unit-key$=":user"]')].filter(slot => slot.closest('[data-turn-key]') === node);
-          if (users.length !== 1 || !id) continue;
-          out.push({ node: users[0], nodes: [users[0]], id, role: 'user' });
-          if (node.querySelector('[data-chatgpt-agent-turn-start], [data-content-search-unit-key$=":assistant"]')) out.push({ node, nodes: [node], id, role: 'assistant' });
+          const answered = node.querySelector('[data-chatgpt-agent-turn-start], [data-content-search-unit-key$=":assistant"]');
+          // Two user slots in one exchange are ambiguous and stay unread. A missing one is not: ChatGPT
+          // unmounts the question while its answer stays (#900), and skipping the whole exchange then
+          // hid that answer's final, so its turn never ended (#910). The answer keeps the exchange's
+          // own key; nothing here is joined by text or position.
+          const unrendered = users.length ? null : unrenderedUserIdOf(node);
+          if (users.length > 1 || !id || (!users.length && !answered && !unrendered)) continue;
+          if (users.length) out.push({ node: users[0], nodes: [users[0]], id, role: 'user' });
+          else if (unrendered) out.push({ node, nodes: [node], id, role: 'user', unrenderedUserId: unrendered });
+          if (answered) out.push({ node, nodes: [node], id, role: 'assistant' });
           previous = null; continue;
         }
         const role = node.getAttribute('data-turn') || searchUnitRole(node) || null;
@@ -693,6 +712,13 @@ var CLF_DOM = (() => {
       const out = [];
       const nodes = turnNodes(turn);
       let explicit = 0;
+      // No slot to read: the id is the page model's, and content.js takes the exact text from
+      // that same page model (userMessageSource), never from what happens to be on screen.
+      if (turn.role === 'user' && turn.unrenderedUserId) {
+        if (seen.has(turn.unrenderedUserId)) return out;
+        seen.add(turn.unrenderedUserId);
+        return [{ id: turn.unrenderedUserId, role: 'user', text: '', turnId: turn.id, node: nodes[0], interrupted: false }];
+      }
       for (const section of nodes) {
         for (const row of sectionRows(section)) {
           if (seen.has(row.id)) continue;
@@ -2400,7 +2426,7 @@ var CLF_DOM = (() => {
     }
   }
 
-  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null, receiptTimeoutMs = null, mention = null, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null, explain = null } = {}) {
+  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null, receiptTimeoutMs = null, mention = null, onSendAttempt = null, onNoSend = null, acceptEditorRemount = null, explain = null, sentRequest = null } = {}) {
     // Why a Send ended without acceptance, as one short code for the caller's diagnostics (#820).
     // It names the first refusal only and never changes what Send does. onNoSend keeps the
     // fork's pre-click callback on the same code.
@@ -2445,6 +2471,7 @@ var CLF_DOM = (() => {
       const priorUserNodes = new Set(priorUsers.map((message) => message.node));
       const priorUserIds = new Set(priorUsers.map((message) => message.id).filter(Boolean));
       let submittedMessageObserved = false;
+      let clickedAt = null;
 
       // click()/dispatchEvent() only prove that JavaScript ran, not that ChatGPT accepted a
       // prompt. Observe for a page-owned consequence instead of sleeping and re-sampling on a
@@ -2462,6 +2489,15 @@ var CLF_DOM = (() => {
           if (!priorUserNodes.has(message.node) && !priorUserIds.has(message.id) && (matchesUser ? matchesUser(message, submitted) : compact(message.text) === expected)) {
             if (acceptUserReceipt && !acceptUserReceipt(message, currentConversation)) continue;
             submittedMessageObserved = true;
+            return true;
+          }
+        }
+        // A new chat's shell can redraw its first exchange without the question before any read
+        // of the page sees it (#942). ChatGPT's own Send request, the first one after this click,
+        // still names that question exactly; the caller decides whether to take its id.
+        if (acceptUserReceipt && sentRequest && clickedAt !== null) {
+          const sent = safe(() => sentRequest(clickedAt), null);
+          if (sent && !priorUserIds.has(sent.id) && acceptUserReceipt({ id: sent.id, role: 'user', sentRequest: true }, currentConversation)) {
             return true;
           }
         }
@@ -2602,6 +2638,7 @@ var CLF_DOM = (() => {
               if (Number.isFinite(receiptTimeoutMs) && receiptTimeoutMs > 0)
                 timer = setTimeout(() => { check(); finish(false); }, receiptTimeoutMs);
             }
+            clickedAt = Date.now();
             try { control.click(); } catch { return finish(false); }
             check(); // Synchronous navigation/cancellation during click also re-proves ownership.
           };
@@ -3008,6 +3045,15 @@ var CLF_DOM = (() => {
     if (!legacyComposer() && !modelPickerTrigger()) return true;
     const ui = modelPickerAccess(stillCurrent), original = await ui.open();
     if (!original) { await ui.close(); return false; }
+    // Account-evaluated exact selection is already proof; visiting unrelated
+    // versions can reset it or fail unnecessarily. Captions and denied choices
+    // do not qualify, and native closure still has to succeed.
+    const current = original.choices.find(choice => choice.bucket === original.currentBucket);
+    if (current?.available && (current.id === model || current.familyId === model) &&
+        (!effort || current.effort === effort)) {
+      const closed = await ui.close();
+      return closed && stillCurrent();
+    }
     let selected = false, closed = false;
     try {
       // Exact provider slug is preferred. Existing saved display slugs may resolve

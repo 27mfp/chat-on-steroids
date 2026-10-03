@@ -61,6 +61,12 @@
    * for the shape it wants; this number only keeps a detached or cyclic tree from looping.
    */
   const MAX_CLIMB = 80;
+  /**
+   * How far a node may sit below React's root. ChatGPT's tree reached 405 levels on 2026-10-02
+   * (#969); at the old limit of 400 the committed root was never found, so the model picker and
+   * the shell's query client read as unavailable and Send failed to confirm its model.
+   */
+  const MAX_ROOT_DEPTH = 2048;
   const MAX_TEXT = 200;
   /** A page with more connector rows than this is not one we need to read exhaustively. */
   const MAX_ROWS = 400;
@@ -93,6 +99,8 @@
   /** Aggregate authored text/HTML copied through MAIN -> isolated world in one scan. */
   const MAX_RESPONSE_TEXT = MAX_TURNS * 512 * 1024;
   const MAX_TURN_TEXT = 512 * 1024;
+  /** One live caption line; the full text is recorded once ChatGPT publishes its message. */
+  const MAX_PREVIEW_TEXT = 300;
 
   function budgetedText(value, budget, perValueLimit) {
     if (typeof value !== 'string' || !value || !budget || budget.remaining <= 0) return '';
@@ -178,7 +186,7 @@
       currentPaths?.set(node, value);
       if (node.alternate) currentPaths?.set(node.alternate, value);
     };
-    while (at && path.length < 400) {
+    while (at && path.length < MAX_ROOT_DEPTH) {
       if (seen.has(at)) return null;
       seen.add(at);
       const cached = currentPaths?.get(at);
@@ -858,7 +866,7 @@
         const messageId = context && typeof context.messageId === 'string' && context.messageId.length <= 200 ? context.messageId : null;
         if (!sources || index < 0 || !messageId) continue;
         const kept = [];
-        for (const source of sources.slice(0, 12)) {
+        for (const source of sources.slice(0, 8)) {
           if (!source || typeof source !== 'object') continue;
           const url = typeof source.url === 'string' && source.url.length <= 2000 && /^https?:\/\//i.test(source.url) ? source.url : null;
           if (!url) continue;
@@ -872,7 +880,7 @@
         }
         if (!kept.length) continue;
         const references = byMessage.get(messageId) || [];
-        if (!references.some(entry => entry.index === index)) references.push({ index, sources: kept });
+        if (references.length < 32 && !references.some(entry => entry.index === index)) references.push({ index, sources: kept });
         byMessage.set(messageId, references);
       }
     }
@@ -1583,7 +1591,7 @@
   /** Read the currently mounted query owner; never retain a client across navigation. */
   function shellQueries(fiber) {
     try {
-      for (let at = fiber, up = 0; at && up < 400; up++, at = at.return) {
+      for (let at = fiber, up = 0; at && up < MAX_ROOT_DEPTH; up++, at = at.return) {
         const client = at.memoizedProps?.client;
         if (typeof client?.getQueryCache !== 'function') continue;
         const queries = client.getQueryCache()?.getAll();
@@ -1884,6 +1892,19 @@
     rendered.sort((a, b) => a.order - b.order);
     return { events, notifications: [] };
   }
+  /** The newest public preamble of a running shell turn whose source message ChatGPT has not
+   * published (#942: a new chat's first turn keeps them out of every mapping until history is
+   * fetched again). Presentation only: no identity, never recorded, gone once the turn ends or
+   * its source message becomes readable and is recorded the ordinary way. */
+  function shellLivePreview(shell, metadata) {
+    if (shell.endMessageId) return null;
+    const preambles = shell.entry.turn.items.flatMap(item => item?.type === 'chatgpt-reasoning-group' &&
+      Array.isArray(item.items) && item.reasoningRecap?.type !== 'hide_all' ? item.items : []).filter(item => item?.type === 'reasoning' &&
+        item.isTransient !== true && item.presentation === 'preamble' && typeof item.content === 'string');
+    const newest = preambles.at(-1);
+    if (!newest || metadata.some(source => source.preamble === newest.content)) return null;
+    return budgetedText(visibleText(newest.content), { remaining: MAX_PREVIEW_TEXT }, MAX_PREVIEW_TEXT) || null;
+  }
   /** Translate only publicly identified items in the mounted exchange. Missing item ids
    * stay missing; a stopped turn does not manufacture replies to its tool calls. */
   function shellTurnSource(fiber, section, turnId) {
@@ -1991,6 +2012,8 @@
     // desired stamp set first, then change only attributes whose value actually differs.
     const desiredTurnStamps = new Map();
     const desiredMessageStamps = new Map();
+    // An exchange whose user slot the shell did not render (see below, `data-clf-fiber-user`).
+    const desiredUserStamps = new Map();
     const desiredThoughtStamps = new Map();
     const desiredImageStamps = new Map();
     const groups = [];
@@ -2072,6 +2095,7 @@
         const generatedImages = generatedImagesOf(group.sections, messages, exactImageNodes, shell?.images);
         const activities = nativeActivities.events;
         const endMessageId = shell ? shell.endMessageId : turnEndMessageId(messages);
+        const preview = shell ? shellLivePreview(shell, metadata) : null;
         // The shell supplies the completed final item's own exact message id,
         // without the classic thought-parent/timestamp tuple. Preserve that
         // identity for handoff capture; streaming and cancelled items stay weak.
@@ -2083,7 +2107,7 @@
           codeModeCalls.length === 0 && calls.length === 0 &&
           requests.length === 0 &&
           renderedMessages.length === 0 &&
-          activities.length === 0 && nativeActivities.notifications.length === 0 && generatedImages.length === 0 && !endMessageId
+          activities.length === 0 && nativeActivities.notifications.length === 0 && generatedImages.length === 0 && !endMessageId && !preview
         ) continue;
         const index = out.length;
         entry = {
@@ -2099,7 +2123,8 @@
           messages: renderedMessages,
           activities,
           thoughtNotifications: nativeActivities.notifications,
-          images: generatedImages
+          images: generatedImages,
+          ...(preview ? { preview } : {})
         };
         // The isolated-world renderer needs to know which visible section this exact Fiber
         // turn descriptor came from. Remember the desired ephemeral scan index now and apply
@@ -2115,6 +2140,16 @@
             // A slot and its inner Markdown are one native message. Publishing
             // both as placement anchors would make every shell final ambiguous.
             for (const [node, id] of exactAnchors) if (id === slot.id) exactAnchors.delete(node);
+          }
+          // A fresh chat can draw its first exchange with no user slot at all, while the page
+          // model holds the exact user message (2026-10-02: a resumed chat, a Goal helper and a
+          // Temporary Chat). Without a slot there was no user message to read, so no Send receipt
+          // and no turn. Name that one exact provider id on the exchange; isolated readers accept
+          // it only under this scan's turn stamp. Several user messages stay unnamed.
+          const users = renderedMessages.filter(message => message.role === 'user');
+          const userSlot = shell.slots.some(slot => /:user$/.test(slot.node.getAttribute('data-content-search-unit-key') || ''));
+          if (!conversation.conflict && !userSlot && users.length === 1 && users[0].rawMessageId) {
+            desiredUserStamps.set(section, `${scanToken}:${index}:${encodeURIComponent(users[0].rawMessageId)}`);
           }
           // Busy hint only, never a completion receipt or a Stop action target.
           const running = shell.entry.turn.status === 'in_progress' ? location.pathname : null;
@@ -2198,6 +2233,11 @@
           section.removeAttribute('data-clf-shell-running');
           section.removeAttribute('data-clf-temporary-chat');
         }
+        const wantedUser = desiredUserStamps.get(section);
+        const currentUser = section.getAttribute('data-clf-fiber-user');
+        if (wantedUser === undefined) {
+          if (currentUser !== null) section.removeAttribute('data-clf-fiber-user');
+        } else if (currentUser !== wantedUser) section.setAttribute('data-clf-fiber-user', wantedUser);
         for (const stamped of [section, ...section.querySelectorAll('[data-content-search-unit-key], [data-chatgpt-search-unit-key]')]) {
           const wanted = desiredTurnStamps.get(stamped);
           const current = stamped.getAttribute('data-clf-fiber-turn');

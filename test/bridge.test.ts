@@ -491,6 +491,22 @@ describe('who is allowed to talk to it', () => {
     expect(await companionDiagnostics()).toBeNull();
   });
 
+  it('keeps the extension preferences it stored and hands them and the app language back in /status', async () => {
+    await pair();
+    const diagnostics = (preferences: { overwrite: boolean; durations: boolean }, stored: boolean) => ({ capturedAt: Date.now(),
+      status: { connected: true, paired: true }, preferences, preferencesStored: stored, tab: null });
+    // A fresh install reports defaults it never stored: not a choice, so nothing is kept.
+    expect((await request('POST', '/diagnostics', { body: diagnostics({ overwrite: true, durations: false }, false) })).status).toBe(200);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(getConfig().ui.browserPreferences).toBeUndefined();
+    expect((await request('POST', '/diagnostics', { body: diagnostics({ overwrite: false, durations: true }, true) })).status).toBe(200);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(getConfig().ui.browserPreferences).toEqual({ overwrite: false, durations: true });
+    await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, language: 'en' } });
+    const status = await request('POST', '/status', { body: { openConversations: [] } });
+    expect(status.body).toMatchObject({ language: 'en', browserPreferences: { overwrite: false, durations: true } });
+  });
+
   it('answers unknown rather than incompatible to a /hello without a protocol header (#568)', async () => {
     // A plain curl in a bug report read "compatible": false and pointed everyone the wrong way.
     const plain = await fetch(`${base}/hello`);
@@ -868,7 +884,53 @@ describe('active agent tab discard projection', () => {
   });
 });
 
+describe('the running turn\'s caption (#942)', () => {
+  it('holds the newest unpublished sentence in memory and drops it when cleared or the page closes', async () => {
+    const { livePreview } = await import('../src/main/live-preview.js');
+    await pair();
+    const conversationId = 'f0f00942-1111-4111-8111-111111111111', other = 'f0f00942-1111-4111-8111-222222222222';
+    const send = (body: unknown) => request('POST', '/live-preview', { body });
+    expect((await send({ conversationId, text: 'First command printed one.' })).status).toBe(200);
+    expect(livePreview([other, conversationId])).toBe('First command printed one.');
+    expect(livePreview([other])).toBeNull();
+    expect((await send({ conversationId, text: null })).status).toBe(200);
+    expect(livePreview([conversationId])).toBeNull();
+    // Bounded and exact: one caption line, nothing else accepted.
+    for (const bad of [{ conversationId, text: 'x'.repeat(301) }, { conversationId, text: '' }, { conversationId },
+      { conversationId, text: 'ok', extra: true }, { conversationId: 'not a chat', text: 'ok' }]) {
+      expect((await send(bad)).status, JSON.stringify(bad).slice(0, 60)).toBe(400);
+    }
+    expect(livePreview([conversationId])).toBeNull();
+    await send({ conversationId, text: 'Second command printed two.' });
+    await request('POST', '/closed', { body: { conversationId, manual: true } });
+    expect(livePreview([conversationId])).toBeNull();
+  });
+
+  it('forgets a caption nobody refreshed for ten minutes', async () => {
+    const { livePreview, setLivePreview } = await import('../src/main/live-preview.js');
+    setLivePreview('f0f00942-1111-4111-8111-333333333333', 'Still going', 1_000);
+    expect(livePreview(['f0f00942-1111-4111-8111-333333333333'], 1_000 + 10 * 60_000)).toBe('Still going');
+    expect(livePreview(['f0f00942-1111-4111-8111-333333333333'], 1_001 + 10 * 60_000)).toBeNull();
+  });
+});
+
 // -------------------------------------------------------------------- auth
+
+describe('extension update holds', () => {
+  it('logs once per reason why the browser extension waits to update, from its status report', async () => {
+    await pair();
+    const lines = () => getLog().filter(entry => entry.message.includes('browser extension waits to update'));
+    const before = lines().length;
+    const status = (updateHold?: string) => request('POST', '/status', { body: { openConversations: [], ...(updateHold ? { updateHold } : {}) } });
+    await status('chat-busy'); await status('chat-busy');
+    expect(lines().slice(before).map(entry => entry.message)).toEqual(['bridge: the browser extension waits to update: a ChatGPT tab is still answering']);
+    await status('already-tried');
+    expect(lines().at(-1)!.message).toContain('already tried this update once; reload it in chrome://extensions');
+    // An unknown reason is not logged, and a report without a hold resets it.
+    await status('made-up'); await status(); await status('chat-busy');
+    expect(lines().slice(before)).toHaveLength(3);
+  });
+});
 
 describe('authorisation', () => {
   it('refuses every route but /hello and /pair without a token', async () => {
@@ -879,6 +941,7 @@ describe('authorisation', () => {
       ['POST', '/events'],
       ['POST', '/correlations'],
       ['POST', '/closed'],
+      ['POST', '/live-preview'],
       ['POST', '/commands/ack']
     ] as const) {
       const reply = await request(method, path, { auth: null, ...(method === 'POST' ? { body: {} } : {}) });
@@ -1511,6 +1574,24 @@ describe('activity feed', () => {
       { title: 'A paper', url: 'https://arxiv.org/abs/2609.00001', source: 'arXiv' },
       { title: 'A report', url: 'https://example.org/report' }
     ] }]);
+  });
+
+  it('bounds a reply’s cited sources by count and by one budget for the whole reply', async () => {
+    // The per-field limits alone allowed megabytes per message revision.
+    await pair();
+    const conversationId = '99999999-8888-7777-6666-555555555556';
+    const source = (at: number) => ({ title: 'T'.repeat(300), url: `https://example.org/${at}/${'p'.repeat(1500)}`, source: 'Example', snippet: 'S'.repeat(300) });
+    const references = Array.from({ length: 50 }, (_, index) => ({ index, sources: Array.from({ length: 12 }, (_, at) => source(index * 100 + at)) }));
+    const result = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'assistant_message', messageId: 'reply-many', time: Date.now(), text: 'Cited.', state: 'final', references }
+    ] } });
+    const [reply] = await readEvents(result.body.sessionId, { kinds: ['assistant_message'] });
+    const kept = reply?.kind === 'assistant_message' ? reply.references ?? [] : [];
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThanOrEqual(32);
+    expect(Math.max(...kept.map(reference => reference.sources.length))).toBeLessThanOrEqual(8);
+    const chars = kept.flatMap(reference => reference.sources).reduce((sum, item) => sum + item.title.length + item.url.length + (item.source?.length ?? 0) + (item.snippet?.length ?? 0), 0);
+    expect(chars).toBeLessThanOrEqual(32_000);
   });
 
   it('records the server-resolved reply model, keeps it across sparse updates and drops malformed values', async () => {
@@ -9184,6 +9265,36 @@ describe('unattributed activity recovery', () => {
     const retry = failed.body.repairs?.[0] ?? await maintenance();
     expect(retry?.reason).toBe('assistant-error');
     expect((await request('POST', '/repairs/claim', { body: { token: retry!.token } })).body.allowed).toBe(true);
+  });
+
+  it('says a recovered answer is being waited for instead of a failed reload, and still retries after it', async () => {
+    await pair();
+    await events(PRIME, [openTurn('answering-again'), { kind: 'chat_error', time: Date.now(),
+      text: 'Connection interrupted', recoverable: true }]);
+    const session = await findSessionByConversation(PRIME);
+    const rows = async () => foldProgress((await readEvents(session!.id, { kinds: ['progress'] }))
+      .filter((event): event is Extract<SessionEvent, { kind: 'progress' }> => event.kind === 'progress'))
+      .map((event) => event.kind === 'progress' ? event.message.text : '');
+    const lines = (text: string) => getLog().filter((entry) => entry.message.includes(text)).length;
+    const failedBefore = lines('reported failed assistant-error recovery'), waitingBefore = lines('is answering again');
+    // ChatGPT resumed the answer by itself; the page keeps the reload for after it, twice in a row.
+    let handout = await maintenance();
+    for (let pass = 0; pass < 2; pass++) {
+      expect(handout?.reason).toBe('assistant-error');
+      expect((await request('POST', '/repairs/claim', { body: { token: handout!.token } })).body.allowed).toBe(true);
+      const waiting = await request('GET', `/status?repairFailed=${handout!.token}&repairAction=reloaded&why=streaming`);
+      expect(await rows()).toEqual(['ChatGPT is answering again; recovery waits until it finishes.']);
+      handout = waiting.body.repairs?.[0] ?? await maintenance();
+    }
+    // One info line for the episode, no warning, and no "Trying to reload" row while it waits.
+    expect(lines('is answering again') - waitingBefore).toBe(1);
+    expect(lines('reported failed assistant-error recovery') - failedBefore).toBe(0);
+    // A real failure afterwards still says so, with the page's reason.
+    expect((await request('POST', '/repairs/claim', { body: { token: handout!.token } })).body.allowed).toBe(true);
+    await request('GET', `/status?repairFailed=${handout!.token}&repairAction=reloaded&why=changed`);
+    expect(getLog().some((entry) => entry.message.includes(
+      `reported failed assistant-error recovery for ${PRIME} (reloaded: the page changed before the action)`))).toBe(true);
+    expect(await rows()).toEqual(['Reload failed while recovering an interrupted response; will retry.']);
   });
 
   it('preserves a recovered assistant-error page without spending a later reload on the same question', async () => {
