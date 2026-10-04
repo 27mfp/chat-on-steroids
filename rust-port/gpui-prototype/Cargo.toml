@@ -1,0 +1,12 @@
+[package]
+name = "cos-gpui-prototype"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "66432e4ca957383dcc9ec61d1353a4b4bd94c6bc", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "66432e4ca957383dcc9ec61d1353a4b4bd94c6bc", default-features = false, features = ["font-kit", "wayland", "x11"] }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "66432e4ca957383dcc9ec61d1353a4b4bd94c6bc", default-features = false, features = ["test-support"] }
